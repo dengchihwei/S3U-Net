@@ -111,7 +111,8 @@ class Trainer(object):
             data_loader = self.valid_loader
         # start the training process
         for idx, batch in enumerate(tqdm(data_loader, desc=str(epoch_idx), unit='b')):
-            images, gts = batch['image'].cuda(), batch['label'].cuda()
+            images = batch['image'].cuda()
+            # labels = batch['label'].cuda()
             output = self.model(images)
             # calculate losses
             losses = self.loss_func(images, output, self.config['loss']['config'])

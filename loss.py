@@ -262,6 +262,7 @@ def calc_dir_response(sample_dir, curr_radius, gradients, basis, grid_base, b, h
     # projected gradients has shape of [B, H, W, 1, 2] / [B, H, W, D, 1, 3]
     proj_gradients = project(grid_sample(gradients, sample_grid, True), basis, proj=True)
     # compute projected flux
+    # swap the direction back
     sample_dir_scaled = proc_sample_dir(sample_dir_scaled, curr_radius)     # [B, H, W, 2, 2] / [B, H, W, D, 3, 3]
     proj_response = project(proj_gradients, sample_dir_scaled)              # [B, H, W, 2, 2] / [B, H, W, D, 3, 3]
     return proj_response
@@ -295,7 +296,7 @@ def flux_loss_symmetry(image, output, sample_num, grad_dims):
     b, c, h, w = image.shape[:4]                               # 2D image [B, C, H, W] / 3D image [B, C, H, W, D]
     d = image.shape[4] if image.dim() == 5 else None
     # 2D image [B, H, W, 2], [B, H, W, 1] / 3D image [B, H, W, D, 3], [B, H, W, D, 1]
-    optimal_dir, estimated_r = preproc_output(output)
+    optimal_dir, estimated_r = preproc_output(output)                       # no need to swap, from network learning
     basis = get_orthogonal_basis(optimal_dir)                               # get the basis of the optimal directions
     sampling_vec = get_sampling_vec(sample_num, estimated_r)                # get sampling sphere / circle
     gradients = get_gradients(image, dims=grad_dims)                        # [B, 2, H, W] / [B, 3, H, W, D]
@@ -369,18 +370,20 @@ def continuity_loss(image, output, flux_response, sample_num):
     # 2D image [B, H, W, 2], [B, H, W, 1] / 3D image [B, H, W, D, 3], [B, H, W, D, 1]
     optimal_dir, estimated_r = preproc_output(output)
     mean_rad = torch.mean(estimated_r, dim=-1).unsqueeze(-1)
-    optimal_dir_scaled = torch.mul(optimal_dir, mean_rad)
-    # get the sample grid on the optimal direction
+    # since the network learns the natural direction, we need to swap the direction for sampling
     order = [2, 1, 0] if d else [1, 0]
+    optimal_dir_scaled = swap_order(torch.mul(optimal_dir, mean_rad), order, dim=-1)
     grid_base = sample_space_to_img_space(get_grid_base(image), h, w, d)              # convert to [0, H]
-    sample_grid = grid_base + swap_order(optimal_dir_scaled, order, dim=-1)
 
     # compute the direction loss
+    direction_loss = 0.0
     optimal_dir = output['vessel']  # original vessel direction, [B, 2, H, W] / [B, 3, H, W, D]
-    sampled_optimal_dir = grid_sample(optimal_dir, sample_grid, permute=False)
-    similarity = F.cosine_similarity(optimal_dir, sampled_optimal_dir)
-    similarity_low = similarity * 0
-    direction_loss = - torch.min(similarity, similarity_low).mean()
+    for scale in torch.linspace(-1.0, 1.0, sample_num):
+        curr_grid = grid_base + optimal_dir_scaled * scale
+        sampled_optimal_dir = grid_sample(optimal_dir, curr_grid, permute=False)
+        similarity = F.cosine_similarity(optimal_dir, sampled_optimal_dir)
+        similarity_low = similarity * 0
+        direction_loss = - torch.min(similarity, similarity_low).mean() / sample_num
 
     # intensity continuity loss
     intensity_loss = 0.0

@@ -84,7 +84,7 @@ class SingleDecoder2d(nn.Module):
 
 
 class SpatialAttention2d(nn.Module):
-    def __init__(self, out_ch, min_scale, max_scale, size=3, pad=1, sample_num=16, sample_layers=4):
+    def __init__(self, out_ch, min_scale, max_scale, size=3, pad=1, sample_num=64, sample_layers=4):
         super(SpatialAttention2d, self).__init__()
         self.min_scale, self.max_scale = min_scale, max_scale
         self.sample_num = sample_num
