@@ -48,7 +48,7 @@ class Trainer(object):
         self.model = self.init_attr('model', network).cuda()
         # model parallel computing
         if self.config['trainer']['gpu_num'] > 1:
-            self.model = DataParallel(self.model, device_ids=list(range(self.config['trainer']['gpu_num'])))
+            self.model = DataParallel(self.model)
         # optimizer configuration
         self.optimizer = self.init_attr('optimizer', optim, self.model.parameters())
         # learning rate scheduler configuration

@@ -14,21 +14,25 @@ def preproc_output(output):
     """
     Pre-process the output of the network
     :param output: Output dictionary of the network
-    :return: vessel: 2D image [B, H, W, 2], 3D image [B, H, W, D, 3]. Optimal direction
+    :return: vessel: 2D image [B, H, W, 2], this is optimal directions
+                     3D image [B, H, W, D, 3]. this is rotation for local frame; {pitch, yaw, roll}.
              radius: 2D image [B, H, W, 1], 3D image [B, H, W, D, 1].
     """
-    vessel = output['vessel']  # this should have shape of [B, 3, H, W, D] / [B, 2, H, W]
-    radius = output['radius']  # this should have shape of [B, 1, H, W, D] / [B, 1, H, W]
-    vessel = F.normalize(vessel, dim=1)         # normalize the optimal dir
-    # if 3D image such as CT and MRA
+    vessel = output['vessel']                               # [B, 3, H, W, D] / [B, 2, H, W]
+    radius = output['radius']                               # [B, 1, H, W, D] / [B, 1, H, W]
+    k1 = output['k1']                                       # [B, 1, H, W, D] / [B, 1, H, W]
+    k2 = output['k2'] if 'k2' in output.keys() else None    # [B, 1, H, W, D] / [B, 1, H, W]
     if vessel.dim() == 5:
-        vessel = vessel.permute(0, 2, 3, 4, 1)  # change to [B, H, W, D, 3]
-        radius = radius.permute(0, 2, 3, 4, 1)  # change to [B, H, W, D, 1]
+        vessel = vessel.permute(0, 2, 3, 4, 1)              # change to [B, H, W, D, 3]
+        radius = radius.permute(0, 2, 3, 4, 1)              # change to [B, H, W, D, 1]
+        ''' code for calculate the rotated optimal direction and local frame '''
+        basis = None
     else:
-        # if 2D image such as OCT
-        vessel = vessel.permute(0, 2, 3, 1)     # change to [B, H, W, 2]
-        radius = radius.permute(0, 2, 3, 1)     # change to [B, H, W, 1]
-    return vessel, radius
+        vessel = vessel.permute(0, 2, 3, 1)                 # change to [B, H, W, 2]
+        radius = radius.permute(0, 2, 3, 1)                 # change to [B, H, W, 1]
+        k1 = k1.permute(0, 2, 3, 1)                         # change to [B, H, W, 1]
+    vessel = F.normalize(vessel, dim=-1)                    # normalize the optimal dir
+    return vessel, radius, k1, k2
 
 
 def get_orthogonal_basis(optimal_dir):
@@ -505,3 +509,55 @@ def calc_local_contrast(image, estimated_r, sample_num, scale_steps):
     # regularization or not
     img_local_contrast = torch.sigmoid(img_local_contrast)
     return img_local_contrast
+
+
+def construct_frames(opt_dir, ):
+    """
+    Construct the parallel transport frame based on the output
+    :param output: network output
+    :return: frame, PT frame, [B, H, W, 3, 2] / [B, H, W, D, 4, 3]
+    """
+
+
+
+# PTF loss to be used to replace the continuity loss
+def ptf_loss(image, output, flux_response, sample_num):
+    """
+    Compute the continuity loss based on parallel transport frame
+    :param image: original image [B, 1, H, W] / [B, 1, H, W, D]
+    :param output: output dictionary 'vessel', 'radius', 'recon', 'attention', 'curvature'
+    :param flux_response: flux response [B, H, W] / [B, H, W, D]
+    :param sample_num: num of sampling directions of a sphere / circle
+    :return: mean direction_loss and mean intensity loss
+    """
+    pass
+    # opt = vessel.permute(0, 2, 3, 4, 1)  # change to [B, H, W, D, 3]
+    # radius = radius.permute(0, 2, 3, 4, 1)  # change to [B, H, W, D, 1]
+    # opt_dir, est_r, k1, k2 = preproc_output(output)     # pre-process the network output
+    # b, c, h, w = image.shape[:4]  # 2D image [B, C, H, W] / 3D image [B, C, H, W, D]
+    # d = image.shape[4] if image.dim() == 5 else None
+    # # 2D image [B, H, W, 2], [B, H, W, 1] / 3D image [B, H, W, D, 3], [B, H, W, D, 1]
+    # mean_rad = torch.mean(estimated_r, dim=-1).unsqueeze(-1)
+    # # since the network learns the natural direction, we need to swap the direction for sampling
+    # order = [2, 1, 0] if d else [1, 0]
+    # optimal_dir_scaled = swap_order(torch.mul(optimal_dir, mean_rad), order, dim=-1)
+    # grid_base = sample_space_to_img_space(get_grid_base(image), h, w, d)  # convert to [0, H]
+    #
+    # # compute the direction loss
+    # direction_loss = 0.0
+    # optimal_dir = output['vessel']  # original vessel direction, [B, 2, H, W] / [B, 3, H, W, D]
+    # for scale in torch.linspace(-1.0, 1.0, sample_num):
+    #     curr_grid = grid_base + optimal_dir_scaled * scale
+    #     sampled_optimal_dir = grid_sample(optimal_dir, curr_grid, permute=False)
+    #     similarity = F.cosine_similarity(optimal_dir, sampled_optimal_dir)
+    #     similarity_low = similarity * 0
+    #     direction_loss = - torch.min(similarity, similarity_low).mean() / sample_num
+    #
+    # # intensity continuity loss
+    # intensity_loss = 0.0
+    # flux_response = flux_response.unsqueeze(1)
+    # for scale in torch.linspace(-1.0, 1.0, sample_num):
+    #     curr_grid = grid_base + optimal_dir_scaled * scale
+    #     sampled_optimal_response = grid_sample(flux_response, curr_grid, permute=False)
+    #     intensity_loss += F.mse_loss(flux_response, sampled_optimal_response) / sample_num
+    # return direction_loss, intensity_loss

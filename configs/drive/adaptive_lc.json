@@ -1,5 +1,5 @@
 {
-  "name": "ADAPTIVE_LC",
+  "name": "DRIVE_ADAPTIVE_LC",
   "train": {
     "type": "Dataset2D",
     "args": {
@@ -60,9 +60,9 @@
   },
   "trainer": {
     "type": "ADAPTIVE_LC",
-    "gpu_num": 1,
+    "gpu_num": 2,
     "epoch_num": 2000,
-    "save_period": 1,
+    "save_period": 5,
     "resume": false,
     "resume_path": "None",
     "checkpoint_dir": "/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/ConnectVessel/trained_models"
