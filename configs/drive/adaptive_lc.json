@@ -6,8 +6,8 @@
       "data_dir": "/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/VesselLearning/Datasets/DRIVE/train",
       "img_size": [584, 565],
       "label_folder": "1st_manual",
-      "patch_size": 256,
-      "spacing": 192,
+      "patch_size": 128,
+      "spacing": 96,
       "use_patch": true,
       "train": true,
       "split_idx": 1000,
@@ -20,8 +20,8 @@
       "data_dir": "/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/VesselLearning/Datasets/DRIVE/test",
       "img_size": [584, 565],
       "label_folder": "1st_manual",
-      "patch_size": 256,
-      "spacing": 192,
+      "patch_size": 128,
+      "spacing": 96,
       "use_patch": true,
       "train": false,
       "split_idx": 0,
@@ -29,7 +29,7 @@
     }
   },
   "loader": {
-    "batch_size": 4,
+    "batch_size": 32,
     "num_workers": 0
   },
   "model": {
@@ -46,7 +46,7 @@
   "optimizer": {
     "type": "Adam",
     "args": {
-      "lr": 0.001,
+      "lr": 0.0001,
       "weight_decay": 1e-5,
       "amsgrad": true
     }
@@ -76,7 +76,7 @@
       "lambda_intensity": 1.0,
       "lambda_attention": 1.0,
       "flux_sample_num": 128,
-      "propagate_sample_num": 32,
+      "sample_num": 16,
       "mean_exp": 0.0
     }
   }

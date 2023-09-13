@@ -15,68 +15,62 @@ def preproc_output(output):
     """
     Pre-process the output of the network
     :param output: Output dictionary of the network
-    :return: vessel: 2D image [B, H, W, 2], this is optimal directions
-                     3D image [B, H, W, D, 3]. this is rotation for local frame; {pitch, yaw, roll}.
+    :return: vessel: 2D image [B, H, W, 2], 3D image [B, H, W, D, 3]. Optimal direction
              radius: 2D image [B, H, W, 1], 3D image [B, H, W, D, 1].
     """
-    vessel = output['vessel']                               # [B, 3, H, W, D] / [B, 2, H, W]
-    radius = output['radius']                               # [B, 1, H, W, D] / [B, 1, H, W]
-    k1 = output['k1']                                       # [B, 1, H, W, D] / [B, 1, H, W]
-    k2 = output['k2'] if 'k2' in output.keys() else None    # [B, 1, H, W, D] / [B, 1, H, W]
+    vessel = output['vessel']                   # this should have shape of [B, 3, H, W, D] / [B, 2, H, W]
+    radius = output['radius']                   # this should have shape of [B, 1, H, W, D] / [B, 1, H, W]
+    vessel = F.normalize(vessel, dim=1)         # normalize the optimal dir
     # if 3D image such as CT and MRA
     if vessel.dim() == 5:
-        vessel = vessel.permute(0, 2, 3, 4, 1)              # change to [B, H, W, D, 3]
-        radius = radius.permute(0, 2, 3, 4, 1)              # change to [B, H, W, D, 1]
-    # if 2D image such as OCT
+        vessel = vessel.permute(0, 2, 3, 4, 1)  # change to [B, H, W, D, 3]
+        radius = radius.permute(0, 2, 3, 4, 1)  # change to [B, H, W, D, 1]
     else:
-        vessel = vessel.permute(0, 2, 3, 1)                 # change to [B, H, W, 2]
-        radius = radius.permute(0, 2, 3, 1)                 # change to [B, H, W, 1]
-        k1 = k1.permute(0, 2, 3, 1)                         # change to [B, H, W, 1]
-        vessel = F.normalize(vessel, dim=-1)                # normalize the optimal dir
-    return vessel, radius, k1, k2
+        # if 2D image such as OCT
+        vessel = vessel.permute(0, 2, 3, 1)     # change to [B, H, W, 2]
+        radius = radius.permute(0, 2, 3, 1)     # change to [B, H, W, 1]
+    return vessel, radius
 
 
-def get_local_reference_frame(vessel):
+def get_orthogonal_basis(opt_dir):
     """
-    Get local reference frames
-    :param vessel: 3D image [B, H, W, D, 3], {pitch, yaw, roll}.
-                   2D image [B, H, W, 2], optimal direction
-    :return: 3D image [B, H, W, D, n(3), 3] / 2D image [B, H, W, n(2), 2]
+    Get orthogonal vectors of other two directions
+    :param opt_dir: 3D image [B, H, W, D, 3] / 2D image [B, H, W, 2]
+    :return: basis: 3D image [B, H, W, D, n(3), 3] / 2D image [B, H, W, n(2), 2]
     """
-    # if 3D image such as CT and MRA
-    if vessel.dim() == 5:
-        ''' code for calculate the rotated optimal direction and local frame '''
-        basis = None
-    # if 2D image such as OCT
+    if opt_dir.dim() == 5:
+        rand_dir = torch.randn_like(opt_dir, device=opt_dir.device)                     # [B, H, W, D, 3]
+        ort_dir1 = F.normalize(torch.cross(rand_dir, opt_dir, dim=-1), dim=-1) + 1e-10  # [B, H, W, D, 3]
+        ort_dir2 = F.normalize(torch.cross(opt_dir, ort_dir1, dim=-1), dim=-1) + 1e-10  # [B, H, W, D, 3]
+        basis = torch.stack((opt_dir, ort_dir1, ort_dir2), dim=-2)                      # [B, H, W, D, 3, 3]
     else:
-        index = torch.LongTensor([1, 0]).to(vessel.device)
-        ortho_dir_1 = torch.index_select(vessel, -1, index)
-        ortho_dir_1[:, :, :, 1] = -ortho_dir_1[:, :, :, 1]
-        ortho_dir_1 = ortho_dir_1 / ortho_dir_1.norm(dim=3, keepdim=True) + 1e-10
-        basis = torch.stack((vessel, ortho_dir_1), dim=3)
+        index = torch.LongTensor([1, 0]).to(opt_dir.device)
+        ort_dir1 = torch.index_select(opt_dir, -1, index)                               # [B, H, W, 2]
+        ort_dir1[:, :, :, 1] = - ort_dir1[:, :, :, 1]                                   # [B, H, W, 2]
+        ort_dir1 = F.normalize(ort_dir1, dim=-1) + 1e-10                                # [B, H, W, 2]
+        basis = torch.stack((opt_dir, ort_dir1), dim=3)                                 # [B, H, W, 2, 2]
     return basis
 
 
-def get_sampling_vec(num_pts, estimated_r):
+def get_sampling_vec(num_pts, dim):
     """
     Get the sampling vectors, sphere or circle
     :param num_pts: sampling num points
-    :param estimated_r: estimated radius, used to parse the device
+    :param dim: 3d or 2d image dimension indicator
     :return: sampling vectors
     """
     # if 3D image such as CT and MRA
-    if estimated_r.dim() == 5:
+    if dim == 5:
         indices = torch.arange(0, num_pts, dtype=torch.float32)
         phi = torch.arccos(1 - 2 * indices / num_pts)
         theta = torch.pi * (1 + 5 ** 0.5) * indices
         x, y, z = torch.cos(theta) * torch.sin(phi), torch.sin(theta) * torch.sin(phi), torch.cos(phi)
-        # flip coordinates according to the sample grid
-        vectors = torch.vstack((z, y, x)).T.to(estimated_r.device)      # This is a sphere sampling
+        vectors = torch.vstack((x, y, z)).T                 # This is a sphere sampling
     else:
         # if 2D image such as OCT
         angle = 2.0 * torch.pi * torch.arange(0, num_pts) / num_pts
         x, y = 1.0 * torch.cos(angle), 1.0 * torch.sin(angle)
-        vectors = torch.vstack((y, x)).T.to(estimated_r.device)         # This is a circle sampling
+        vectors = torch.vstack((x, y)).T                    # This is a circle sampling
     return vectors
 
 
@@ -90,6 +84,46 @@ def get_gradients(image):
     gradients = torch.cat(torch.gradient(image, dim=dims), dim=1)
     gradients += torch.randn(gradients.size(), device=gradients.device) * 1e-10
     return gradients
+
+
+def sample_space_to_image_space(grid):
+    """
+    Convert the image space to sample space
+    [[-1, 1], [-1, 1], [-1, 1]] -> [[0, H], [0, W], [0, D]]
+    grid is of size [B, H, W, D, 3]
+    convert [-1, 1] scale to [0, H] scale
+    :param grid: [B, H, W, D, 3] or [B, H, W, 2]
+    :return: [B, H, W, D, 3] or [B, H, W, 2]
+    """
+    grid = (grid + 0.0) * 0.5 + 0.5
+    if grid.dim() == 5:
+        b, h, w, d, c = grid.size()
+        grid[..., 2] = grid[..., 2] * d
+    else:
+        b, h, w, c = grid.size()
+    grid[..., 0] = grid[..., 0] * h
+    grid[..., 1] = grid[..., 1] * w
+    return grid
+
+
+def image_space_to_sample_space(grid):
+    """
+    Convert the image space to sample space
+    [[0, H], [0, W], [0, D]] -> [[-1, 1], [-1, 1], [-1, 1]]
+    grid is of size [B, H, W, D, 3]
+    convert [0, H] scale to [-1, 1] scale
+    :param grid: [B, H, W, D, 3]
+    :return: [B, H, W, D, 3]
+    """
+    grid = grid + 0
+    if grid.dim() == 5:
+        b, h, w, d, c = grid.size()
+        grid[..., 2] = 2.0 * grid[..., 2] / d - 1
+    else:
+        b, h, w, c = grid.size()
+    grid[..., 0] = 2.0 * grid[..., 0] / h - 1
+    grid[..., 1] = 2.0 * grid[..., 1] / w - 1
+    return grid
 
 
 def get_grid_base(image):
@@ -115,43 +149,7 @@ def get_grid_base(image):
     return grid.to(image.device)
 
 
-def sample_space_to_img_space(grid):
-    """
-    Convert the image space to sample space
-        [[-1, 1], [-1, 1], [-1, 1]] -> [[0, H], [0, W], [0, D]]
-    grid is of size [B, H, W, D, 3] or [B, H, W, 2]
-    convert [-1, 1] scale to [0, H] scale
-    :param grid: [B, H, W, D, 3] or [B, H, W, 2]
-    :return: [B, H, W, D, 3] or [B, H, W, 2]
-    """
-    b, h, w, d, c = grid.shape
-    grid = (grid + 0.0) * 0.5 + 0.5
-    grid[..., 0] = grid[..., 0] * h
-    grid[..., 1] = grid[..., 1] * w
-    if d:
-        grid[..., 2] = grid[..., 2] * d
-    return grid
-
-
-def img_space_to_sample_space(grid):
-    """
-    Convert the image space to sample space
-    [[0, H], [0, W], [0, D]] -> [[-1, 1], [-1, 1], [-1, 1]]
-    grid is of size [B, H, W, D, 3] or [B, H, W, 2]
-    convert [0, H] scale to [-1, 1] scale
-    :param grid: [B, H, W, D, 3] or [B, H, W, 2]
-    :return: [B, H, W, D, 3] or [B, H, W, 2]
-    """
-    grid = grid + 0.0
-    b, h, w, d, c = grid.shape
-    grid[..., 0] = 2.0 * grid[..., 0] / h - 1
-    grid[..., 1] = 2.0 * grid[..., 1] / w - 1
-    if d:
-        grid[..., 2] = 2.0 * grid[..., 2] / d - 1
-    return grid
-
-
-def grid_sample(image, sample_grid, permute):
+def grid_sample(image, sample_grid, permute=False):
     """
     Functional grid sample overload
     :param image: [B, 1, H, W] / [B, 1, H, W, D]
@@ -162,10 +160,10 @@ def grid_sample(image, sample_grid, permute):
     sampled = F.grid_sample(image, sample_grid, align_corners=True, padding_mode='border')
     if image.dim() == 5:
         if permute:
-            sampled = sampled.permute(0, 2, 3, 4, 1).unsqueeze(4)
+            sampled = sampled.permute(0, 2, 3, 4, 1).unsqueeze(-2)
     else:
         if permute:
-            sampled = sampled.permute(0, 2, 3, 1).unsqueeze(3)
+            sampled = sampled.permute(0, 2, 3, 1).unsqueeze(-2)
     return sampled
 
 
@@ -177,11 +175,20 @@ def get_sample_grid(curr_dir, curr_rad, grid_base):
     :param grid_base: grid base for sampling of the original image [B, H, W, D, 3]
     :return: the sampling grid, same size as grid base
     """
-    b, h, w, d, c = grid_base.shape                                         # get the shape of the image
-    # indices = torch.tensor([2, 1, 0], device=curr_dir.device)
-    # curr_dir = torch.index_select(curr_dir, -1, indices)
-    dir_scaled = torch.mul(curr_dir.repeat((b, h, w, d, 1)), curr_rad)      # scale the sample dir with radius
-    sample_grid = img_space_to_sample_space(grid_base + dir_scaled)         # convert to [-1, 1]
+    if grid_base.dim() == 5:
+        b, h, w, d, c = grid_base.size()
+    else:
+        b, h, w, c = grid_base.size()
+        d = None
+    # since the sampling direction is in natural direction defined in get_sampling_vec()
+    # we need to flip the coordinates to fit the grid sample method
+    indices = torch.tensor([2, 1, 0], device=curr_dir.device)
+    curr_dir = torch.index_select(curr_dir, -1, indices)
+    curr_dir = curr_dir.repeat((b, h, w, d, 1)) if d else curr_dir.repeat((b, h, w, 1))
+    # scale the sample dir with radius
+    dir_scaled = torch.mul(curr_dir, curr_rad)
+    # offset and convert to [-1, 1]
+    sample_grid = image_space_to_sample_space(grid_base + dir_scaled)
     return sample_grid
 
 
@@ -218,16 +225,16 @@ def flux_loss(image, output, sample_num):
     :return: flux response, mean flux loss
     """
     """ Step 1. Get the output vessel, radius and two principle curvatures """
-    vessel, estimated_r, _, _ = preproc_output(output)                      # [B, H, W, D, 3], [B, H, W, D, N]
+    optimal_dir, estimated_r = preproc_output(output)                       # [B, H, W, D, 3], [B, H, W, D, N]
     """ Step 2. Compute the basis based on the vessel flow direction """
-    basis = get_local_reference_frame(vessel)                               # [B, H, W, D, 3, 3]
-    optimal_dir = basis[:, :, :, :, 1] if vessel.dim() == 5 else vessel
+    basis = get_orthogonal_basis(optimal_dir)                               # [B, H, W, D, 3, 3]
     """ Step 3. Get sampling sphere vectors """
-    sample_vecs = get_sampling_vec(sample_num, estimated_r)                 # [sample_num, 3]
+    sample_vecs = get_sampling_vec(sample_num, estimated_r.dim())           # [N, 3]
+    sample_vecs = sample_vecs.to(estimated_r.device)
     """ Step 4. Compute image gradients """
     gradients = get_gradients(image)                                        # [B, 3, H, W, D]
     """ Step 5. Get the base sampling grid """
-    grid_base = sample_space_to_img_space(get_grid_base(gradients))         # convert to [0, H], [B, H, W, D, 3]
+    grid_base = sample_space_to_image_space(get_grid_base(gradients))       # convert to [0, H], [B, H, W, D, 3]
     """ Step 6. Start the for loop to calculate the response """
     response = torch.zeros(optimal_dir.size(), device=optimal_dir.device)   # [B, H, W, D, 3]
     for i in range(int(sample_num / 2)):
@@ -246,47 +253,91 @@ def flux_loss(image, output, sample_num):
     return response, mean_flux_loss
 
 
-def ptf_loss(image, output, flux_response, propagate_num, step_len):
+def continuity_loss(image, output, flux_response, sample_num):
     """
-    Compute the continuity loss based on parallel transport frame
-    :param image: original image [B, 1, H, W] / [B, 1, H, W, D]
-    :param output: output dictionary 'vessel', 'radius', 'recon', 'attention', 'curvature'
-    :param flux_response: flux response [B, H, W] / [B, H, W, D]
-    :param propagate_num: number of propagations of PTF
-    :param step_len: step length of each propagation, float
+    Compute the continuity loss
+    :param image: original image [B, 1, H, W, D]
+    :param output: output dictionary 'vessel', 'radius', 'recon', 'attention'
+    :param flux_response: flux response [B, H, W, D]
+    :param sample_num: num of sampling directions of a sphere
     :return: mean direction_loss and mean intensity loss
     """
-    """ Step 1. Get the output vessel, radius and two principle curvatures """
-    vessel, _, k1, k2 = preproc_output(output)                              # [B, H, W, D, 3], [B, H, W, D, N]
-    """ Step 2. Compute the basis based on the vessel flow direction """
-    basis = get_local_reference_frame(vessel)                               # [B, H, W, D, 3, 3] / [B, H, W, D, 2, 2]
-    optimal_dir = torch.select(basis, dim=-2, index=0)                      # [B, H, W, D, 3] / [B, H, W, D, 2]
-    if k2:
-        optimal_dir = optimal_dir.permute(0, 4, 1, 2, 3)
-    else:
-        optimal_dir = optimal_dir.permute(0, 3, 1, 2)
-    """ Step 3. Construct the parrallel transport frames """
-    img_coords = sample_space_to_img_space(get_grid_base(image))            # [B, H, W, D, 3] / [B, H, W, 2]
-    curr_frame = torch.stack((img_coords.unsqueeze(-2), basis), dim=-2)     # [B, H, W, D, 4, 3] / [B, H, W, D, 3, 2]
-    """ Step 4. Propagate the curves based on the image frame """
+    """ Step 1. Get the output vessel direction and radius, calculate mean radius """
+    opt_dir, est_rad = preproc_output(output)                               # [B, H, W, D, 3], [B, H, W, D, 1]
+    mean_rad = torch.mean(est_rad, dim=-1, keepdim=True)                    # [B, H, W, D, 1]
+    """ Step 2. Since the network learns the natural direction, we need to swap the direction for sampling """
+    indices = torch.LongTensor([2, 1, 0]) if opt_dir.dim() == 5 else torch.LongTensor([1, 0])
+    opt_dir = torch.index_select(opt_dir, -1, indices.to(opt_dir.device))   # [B, H, W, D, 3]
+    opt_dir_scaled = torch.mul(opt_dir, mean_rad)                           # [B, H, W, D, 3]
+    """ Step 3. Get the base sampling grid """
+    grid_base = sample_space_to_image_space(get_grid_base(image))           # convert to [0, H], [B, H, W, D, 3]
+    """ Step 4. Direction Loss """
     direction_loss = 0.0
+    for scale in torch.linspace(-1.0, 1.0, sample_num):
+        curr_grid = grid_base + opt_dir_scaled * scale
+        sampled_opt_dir = grid_sample(output['vessel'], curr_grid)
+        similarity = F.cosine_similarity(output['vessel'], sampled_opt_dir)
+        direction_loss -= torch.min(similarity, similarity * 0).mean() / sample_num
+    """ Step 5. Intensity Continuity Loss """
     intensity_loss = 0.0
-    for i in range(propagate_num):
-        curr_frame = propagate_frame(curr_frame, step_len, k1, k2)
-        curr_coords = torch.select(curr_frame, dim=-2, index=0)
-        curr_dirs = torch.select(curr_frame, dim=-2, index=1)
-        # swap the orientation before offset the grid
-        indices = [2, 1, 0] if k2 else [1, 0]
-        indices = torch.tensor(indices, device=curr_coords.device)
-        curr_grid = torch.index_select(curr_coords, -1, indices)
-        # offset to get the sample grid based on the base grid
-        sampled_response = grid_sample(flux_response, curr_grid, permute=False)
-        sampled_direction = grid_sample(optimal_dir, curr_grid, permute=False)
-        # intensity continuity loss
-        intensity_loss += F.l1_loss(flux_response, sampled_response) / propagate_num
-        # direction continuity loss
-        direction_loss += F.cosine_similarity(curr_dirs, sampled_direction)
+    flux_response = flux_response.unsqueeze(1)
+    for scale in torch.linspace(-1.0, 1.0, sample_num):
+        curr_grid = grid_base + opt_dir_scaled * scale
+        sampled_response = grid_sample(flux_response, curr_grid)
+        intensity_loss += F.mse_loss(flux_response, sampled_response) / sample_num
     return direction_loss, intensity_loss
+
+
+# def ptf_loss(image, output, flux_response, propagate_num, step_len):
+#     """
+#     Compute the continuity loss based on parallel transport frame
+#     :param image: original image [B, 1, H, W] / [B, 1, H, W, D]
+#     :param output: output dictionary 'vessel', 'radius', 'recon', 'attention', 'curvature'
+#     :param flux_response: flux response [B, H, W] / [B, H, W, D]
+#     :param propagate_num: number of propagations of PTF
+#     :param step_len: step length of each propagation, float
+#     :return: mean direction_loss and mean intensity loss
+#     """
+#     """ Step 1. Get the output vessel, radius and two principle curvatures """
+#     vessel, radius, k1, k2 = preproc_output(output)                         # [B, H, W, D, 3], [B, H, W, D, N]
+#     step_len = torch.mean(radius, dim=-1) * step_len
+#     """ Step 2. Compute the basis based on the vessel flow direction """
+#     basis = get_local_reference_frame(vessel)                               # [B, H, W, D, 3, 3] / [B, H, W, 2, 2]
+#     optimal_dir = torch.select(basis, dim=-2, index=0)                      # [B, H, W, D, 3] / [B, H, W, 2]
+#     if k2:
+#         optimal_dir = optimal_dir.permute(0, 4, 1, 2, 3)
+#     else:
+#         optimal_dir = optimal_dir.permute(0, 3, 1, 2)
+#     """ Step 3. Construct the parrallel transport frames """
+#     img_coords = sample_space_to_img_space(get_grid_base(image, False))     # [B, H, W, D, 3] / [B, H, W, 2]
+#     """ Step 4. Propagate the curves based on the image frame """
+#     direction_loss = 0.0
+#     intensity_loss = 0.0
+#     flux_response = flux_response.unsqueeze(1)
+#     # propagate on the learnt direction
+#     for sign in [1.0, -1.0]:
+#         basis = sign * basis
+#         k1 = sign * k1
+#         k2 = sign * k2 if k2 else None
+#         curr_frame = torch.cat((img_coords.unsqueeze(-2), basis), dim=-2)  # [B, H, W, D, 4, 3] / [B, H, W, 3, 2]
+#         for _ in range(propagate_num):
+#             curr_frame = propagate_frame(curr_frame, step_len, k1, k2)
+#             curr_coords = torch.select(curr_frame, dim=-2, index=0)
+#             # swap the orientation before offset the grid
+#             indices = [2, 1, 0] if k2 else [1, 0]
+#             indices = torch.tensor(indices, device=curr_coords.device)
+#             curr_grid = torch.index_select(curr_coords, -1, indices)
+#             # offset to get the sample grid based on the base grid
+#             sampled_response = grid_sample(flux_response, curr_grid, permute=False)
+#             sampled_direction = grid_sample(optimal_dir, curr_grid, permute=False)
+#             # intensity continuity loss
+#             intensity_loss += F.l1_loss(flux_response, sampled_response) / (propagate_num * 2)
+#             # direction continuity loss
+#             curr_dirs = torch.select(curr_frame, dim=-2, index=1)
+#             curr_dirs = curr_dirs.permute(0, 4, 1, 2, 3) if k2 else curr_dirs.permute(0, 3, 1, 2)
+#             similarity = torch.abs(F.cosine_similarity(curr_dirs, sampled_direction, dim=1, eps=1e-6))
+#             direction_loss += (1.0 - similarity.mean()) / (propagate_num * 2)
+#     return direction_loss, intensity_loss
 
 
 def recon_loss(image, output, sup=False):
@@ -329,13 +380,16 @@ def vessel_loss(image, output, loss_config):
     """ Step 1. Calculate the flux loss """
     lambda_flux = loss_config['lambda_flux']
     flux_sample_num = loss_config['flux_sample_num']
-    flux_response, mean_flux_loss = lambda_flux * flux_loss(image, output, flux_sample_num)
+    flux_response, mean_flux_loss = flux_loss(image, output, flux_sample_num)
+    mean_flux_loss = lambda_flux * mean_flux_loss
     """ Step 2. Calculate the continuity loss """
     lambda_direction = loss_config['lambda_direction']
     lambda_intensity = loss_config['lambda_intensity']
-    step_len = loss_config['step_len']
-    propagate_sample_num = loss_config['propagate_sample_num']
-    direction_loss, intensity_loss = ptf_loss(image, output, flux_response, propagate_sample_num, step_len)
+    sample_num = loss_config['sample_num']
+    # step_len = loss_config['step_len']
+    # propagate_sample_num = loss_config['propagate_sample_num']
+    # direction_loss, intensity_loss = ptf_loss(image, output, flux_response, propagate_sample_num, step_len)
+    direction_loss, intensity_loss = continuity_loss(image, output, flux_response, sample_num)
     direction_loss, intensity_loss = lambda_direction * direction_loss, lambda_intensity * intensity_loss
     """ Step 3. Calculate the reconstruction loss """
     lambda_recon = loss_config['lambda_recon']
@@ -357,4 +411,52 @@ def vessel_loss(image, output, loss_config):
             total_loss += mean_att_loss
             losses['attn_loss'] = mean_att_loss
             losses['total_loss'] = total_loss
+    # print(losses['total_loss'])
     return losses
+
+
+def calc_local_contrast(image, estimated_r, sample_num, scale_steps):
+    b, c, h, w = image.shape[:4]                                    # 2D image [B, C, H, W] / 3D image [B, C, H, W, D]
+    d = image.shape[4] if image.dim() == 5 else None
+    sampling_vec = get_sampling_vec(sample_num, estimated_r)        # get sampling sphere / circle
+    inside_scales = torch.linspace(0.1, 1.0, steps=scale_steps)     # multiple scales of inside
+    outside_scales = torch.linspace(1.1, 2.0, steps=scale_steps)    # multiple scales of outside
+    grid_base = sample_space_to_image_space(get_grid_base(image))   # Convert to [0, H]
+    # distinguish the 2D and 3D image
+    if d:
+        estimated_r = estimated_r.permute(0, 2, 3, 4, 1)                    # [B, H, W, D, 1]
+        img_contrast_i = torch.zeros(b, c, h, w, d).to(estimated_r.device)
+        img_contrast_o = torch.zeros(b, c, h, w, d).to(estimated_r.device)
+    else:
+        estimated_r = estimated_r.permute(0, 2, 3, 1)                       # [B, H, W, 1]
+        img_contrast_i = torch.zeros(b, c, h, w).to(estimated_r.device)
+        img_contrast_o = torch.zeros(b, c, h, w).to(estimated_r.device)
+
+    shift = int(sample_num / 2)
+    for i in range(scale_steps):                                    # loop over the sampling scales
+        scale_i, scale_o = inside_scales[i], outside_scales[i]
+        for j in range(shift):                                      # loop over the sampling directions
+            sample_dir1, sample_dir2 = sampling_vec[j], sampling_vec[j+shift]   # this is a 2d / 3d vector
+            curr_rad1 = estimated_r[..., j:j+1] if estimated_r.size(-1) > 1 else estimated_r
+            curr_rad2 = estimated_r[..., j+shift:j+shift+1] if estimated_r.size(-1) > 1 else estimated_r
+            # get sample grids of the inside and outside for both directions
+            sample_grid_pos_i = get_sample_grid(sample_dir1, curr_rad1 * scale_i, grid_base)
+            sample_grid_neg_i = get_sample_grid(sample_dir2, curr_rad2 * scale_i, grid_base)
+            sample_grid_pos_o = get_sample_grid(sample_dir1, curr_rad1 * scale_o, grid_base)
+            sample_grid_neg_o = get_sample_grid(sample_dir2, curr_rad2 * scale_o, grid_base)
+            # sampling intensities
+            sampled_img_pos_i = torch.clip(image - grid_sample(image, sample_grid_pos_i, permute=False), min=0.0)
+            sampled_img_neg_i = torch.clip(image - grid_sample(image, sample_grid_neg_i, permute=False), min=0.0)
+            sampled_img_pos_o = torch.clip(image - grid_sample(image, sample_grid_pos_o, permute=False), min=0.0)
+            sampled_img_neg_o = torch.clip(image - grid_sample(image, sample_grid_neg_o, permute=False), min=0.0)
+            # adding the image local contrasts
+            img_contrast_i += torch.mul(sampled_img_pos_i, sampled_img_neg_i) / sample_num / scale_steps
+            img_contrast_o += torch.mul(sampled_img_pos_o, sampled_img_neg_o) / sample_num / scale_steps
+    # compute the inside / outside ratio
+    # img_contrast_i = torch.mean(img_contrast_i, dim=0)
+    # img_contrast_o = torch.mean(img_contrast_o, dim=0)
+    epsilon = 3e-2 if d else 1e-4
+    img_local_contrast = torch.div(img_contrast_o, img_contrast_i + epsilon) - 1.0
+    # regularization or not
+    img_local_contrast = torch.sigmoid(img_local_contrast)
+    return img_local_contrast

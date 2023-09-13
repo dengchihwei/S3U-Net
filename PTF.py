@@ -16,11 +16,12 @@ def construct_P(step_len, k1, k2=None):
     :param k2: second curvature learnt from the network, 2D: [b, h, w]; 3D: [b, h, w, d]
     :return: P, propagation matrix, 2D: [b, h, w, 3, 3]; 3D: [b, h, w, d, 4, 4]
     """
+    k1 = k1.clone() + 1e-10
     # 2d case
     if len(k1.size()) == 3:
         b, h, w = k1.size()
-        skt = torch.sin(k1 * step_len)
-        ckt = torch.cos(k1 * step_len)
+        skt = torch.sin(torch.mul(k1, step_len))
+        ckt = torch.cos(torch.mul(k1, step_len))
         # construct the propagation matrix
         P = torch.zeros(b, h, w, 3, 3)
         P[:, :, :, 0, 0] = torch.ones(b, h, w)
@@ -32,10 +33,11 @@ def construct_P(step_len, k1, k2=None):
         P[:, :, :, 2, 2] = ckt
     # 3d case
     else:
+        k2 = k2.clone() + 1e-10
         b, h, w, d = k1.size()
         k = torch.sqrt(k1 ** 2 + k2 ** 2)
-        skt = torch.sin(k * step_len)
-        ckt = torch.cos(k * step_len)
+        skt = torch.sin(torch.mul(k, step_len))
+        ckt = torch.cos(torch.mul(k, step_len))
         # construct the propagation matrix
         P = torch.zeros(b, h, w, d, 4, 4)
         P[:, :, :, :, 0, 0] = torch.ones(b, h, w, d)
@@ -64,17 +66,21 @@ def propagate_frame(frame, step_len, k1, k2=None):
     :return: next frame, shape of [b, h, w, 3, 2]
     """
     # get the P matrix
-    P = construct_P(step_len, k1, k2)
+    P = construct_P(step_len, k1, k2).to(frame.device)
     # reshape the matrix, 2d case
-    if len(k1.size()) == 3:
+    original_size = frame.size()
+    if k1.dim() == 3:
         P = P.view(-1, 3, 3)
         frame = frame.view(-1, 3, 2)
+    # reshape the matrix, 3d case
     else:
         P = P.view(-1, 4, 4)
         frame = frame.view(-1, 4, 3)
     next_frame = torch.bmm(P, frame)
     # recover the frame shape
-    next_frame = next_frame.view(frame.size())
+    next_frame = next_frame.view(original_size)
+    # normalize the directions
+
     return next_frame
 
 
@@ -89,12 +95,14 @@ def validate(k1, k2, step_len):
         [0, -k1 * sin(kt) / k, (k2 ** 2 + k1 ** 2 * cos(kt)) / (k ** 2), k1 * k2 * (cos(kt) - 1) / (k ** 2)],
         [0, -k2 * sin(kt) / k, k1 * k2 * (cos(kt) - 1) / (k ** 2), (k1 * k1 + k2 * k2 * cos(kt)) / (k ** 2)]
     ])
-    print(P)
 
 
 if __name__ == '__main__':
+    import torch.nn.functional as F
     image_frame = torch.randn(4, 64, 64, 64, 4, 3)
-    image_k1 = torch.randn(4, 64, 64, 64)
-    image_k2 = torch.randn(4, 64, 64, 64)
-    propagate_frame(image_frame, 0.5, image_k1, image_k2)
+    image_frame = F.normalize(image_frame, dim=-1)
+    image_k1 = torch.randn(4, 64, 64, 64) * 0.0
+    image_k2 = torch.randn(4, 64, 64, 64) * 0.0
+    new_frame = propagate_frame(image_frame, 0.5, image_k1, image_k2)
     validate(image_k1[0, 0, 0, 0], image_k2[0, 0, 0, 0], 0.5)
+    assert torch.equal(image_frame, new_frame)

@@ -119,6 +119,7 @@ class Trainer(object):
             # step optimizer
             if train:
                 if torch.isnan(losses['total_loss']):
+                    print(losses)
                     raise ValueError('Loss Explosion!!!')
                 else:
                     self.optimizer.zero_grad()
