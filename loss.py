@@ -7,7 +7,7 @@
 
 import torch
 import torch.nn.functional as F
-from PTF import propagate_frame
+# from PTF import propagate_frame
 
 
 # --------- Utility Functions ---------
@@ -182,8 +182,8 @@ def get_sample_grid(curr_dir, curr_rad, grid_base):
         d = None
     # since the sampling direction is in natural direction defined in get_sampling_vec()
     # we need to flip the coordinates to fit the grid sample method
-    indices = torch.tensor([2, 1, 0], device=curr_dir.device)
-    curr_dir = torch.index_select(curr_dir, -1, indices)
+    indices = torch.LongTensor([2, 1, 0]) if d else torch.LongTensor([1, 0])
+    curr_dir = torch.index_select(curr_dir, -1, indices.to(curr_dir.device))
     curr_dir = curr_dir.repeat((b, h, w, d, 1)) if d else curr_dir.repeat((b, h, w, 1))
     # scale the sample dir with radius
     dir_scaled = torch.mul(curr_dir, curr_rad)
@@ -274,7 +274,7 @@ def continuity_loss(image, output, flux_response, sample_num):
     """ Step 4. Direction Loss """
     direction_loss = 0.0
     for scale in torch.linspace(-1.0, 1.0, sample_num):
-        curr_grid = grid_base + opt_dir_scaled * scale
+        curr_grid = image_space_to_sample_space(grid_base + opt_dir_scaled * scale)
         sampled_opt_dir = grid_sample(output['vessel'], curr_grid)
         similarity = F.cosine_similarity(output['vessel'], sampled_opt_dir)
         direction_loss -= torch.min(similarity, similarity * 0).mean() / sample_num
@@ -282,7 +282,7 @@ def continuity_loss(image, output, flux_response, sample_num):
     intensity_loss = 0.0
     flux_response = flux_response.unsqueeze(1)
     for scale in torch.linspace(-1.0, 1.0, sample_num):
-        curr_grid = grid_base + opt_dir_scaled * scale
+        curr_grid = image_space_to_sample_space(grid_base + opt_dir_scaled * scale)
         sampled_response = grid_sample(flux_response, curr_grid)
         intensity_loss += F.mse_loss(flux_response, sampled_response) / sample_num
     return direction_loss, intensity_loss
@@ -418,7 +418,8 @@ def vessel_loss(image, output, loss_config):
 def calc_local_contrast(image, estimated_r, sample_num, scale_steps):
     b, c, h, w = image.shape[:4]                                    # 2D image [B, C, H, W] / 3D image [B, C, H, W, D]
     d = image.shape[4] if image.dim() == 5 else None
-    sampling_vec = get_sampling_vec(sample_num, estimated_r)        # get sampling sphere / circle
+    sample_vecs = get_sampling_vec(sample_num, estimated_r.dim())   # get sampling sphere / circle
+    sample_vecs = sample_vecs.to(estimated_r.device)
     inside_scales = torch.linspace(0.1, 1.0, steps=scale_steps)     # multiple scales of inside
     outside_scales = torch.linspace(1.1, 2.0, steps=scale_steps)    # multiple scales of outside
     grid_base = sample_space_to_image_space(get_grid_base(image))   # Convert to [0, H]
@@ -436,9 +437,10 @@ def calc_local_contrast(image, estimated_r, sample_num, scale_steps):
     for i in range(scale_steps):                                    # loop over the sampling scales
         scale_i, scale_o = inside_scales[i], outside_scales[i]
         for j in range(shift):                                      # loop over the sampling directions
-            sample_dir1, sample_dir2 = sampling_vec[j], sampling_vec[j+shift]   # this is a 2d / 3d vector
+            k = j + shift
+            sample_dir1, sample_dir2 = sample_vecs[j], sample_vecs[k]   # this is a 2d / 3d vector
             curr_rad1 = estimated_r[..., j:j+1] if estimated_r.size(-1) > 1 else estimated_r
-            curr_rad2 = estimated_r[..., j+shift:j+shift+1] if estimated_r.size(-1) > 1 else estimated_r
+            curr_rad2 = estimated_r[..., k:k+1] if estimated_r.size(-1) > 1 else estimated_r
             # get sample grids of the inside and outside for both directions
             sample_grid_pos_i = get_sample_grid(sample_dir1, curr_rad1 * scale_i, grid_base)
             sample_grid_neg_i = get_sample_grid(sample_dir2, curr_rad2 * scale_i, grid_base)
