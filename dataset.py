@@ -9,130 +9,101 @@ import os
 import torch
 import numpy as np
 import SimpleITK as SiTk
+import monai.transforms as tf
 from PIL import Image
 from tqdm import tqdm
 from torch.utils.data import Dataset
-from scipy.ndimage.morphology import binary_erosion
+from scipy.ndimage import binary_erosion
 
 
-class Dataset2D(Dataset):
-    def __init__(self, data_dir, img_size, label_folder, patch_size=256, spacing=192,
-                 use_patch=True, train=True, split_idx=1000, augment=False):
+class VesselDataset(Dataset):
+    def __init__(self, patch_sizes=None, spacings=None, augment=False):
         """
-        init the dataset object
-        :param data_dir: the directory of the dataset
-        :param img_size: sizes of the retinal images
-        :param label_folder: sub-folder of label images
-        :param patch_size: size of the image patch
-        :param spacing: spacing of image cropping
-        :param use_patch: use patch as input or not
-        :param train: decide to select images from top or bottom
-        :param split_idx: index to split the train and valid dataset
-        :param augment: data augmentation or not
-
+        abstract class for image loader
+        :param patch_sizes: size of patches to crop
+        :param spacings: spacings of patch cropping
+        :param augment: augmentation only for 2D datasets
         """
+        self.subjects = []
+        self.patch_sizes = patch_sizes
+        self.spacings = spacings
         self.augment = augment
-        self.use_patch = use_patch
-        self.patch_size = patch_size
-        self.spacing = spacing
-        # get mask, image, label files
-        mask_path = os.path.join(data_dir, 'mask')
-        image_path = os.path.join(data_dir, 'images')
-        label_path = os.path.join(data_dir, label_folder)
-        self.mask_files = [os.path.join(mask_path, file) for file in sorted(os.listdir(mask_path))]
-        self.image_files = [os.path.join(image_path, file) for file in sorted(os.listdir(image_path))]
-        self.label_files = [os.path.join(label_path, file) for file in sorted(os.listdir(label_path))]
-        # split the files
-        self.mask_files = self.mask_files[:split_idx] if train else self.mask_files[split_idx:]
-        self.image_files = self.image_files[:split_idx] if train else self.image_files[split_idx:]
-        self.label_files = self.label_files[:split_idx] if train else self.label_files[split_idx:]
-        # load images, labels and masks
-        self.images, self.labels, self.masks = [], [], []
-        for i in tqdm(range(len(self.image_files))):
-            image = np.asarray(Image.open(self.image_files[i]))[..., 1]
-            label = np.asarray(Image.open(self.label_files[i]))
-            mask = np.asarray(Image.open(self.mask_files[i]).convert('L'))
-            # normalization
-            image = (image - image.min()) / (image.max() - image.min())
-            mask = np.array(mask > 0.5).astype(float)
-            mask = binary_erosion(mask, np.ones((5, 5)))
-            # padding to image size
-            target_h, target_w = img_size
-            source_h, source_w = image.shape[:2]
-            delta_h = target_h - source_h
-            delta_w = target_w - source_w
-            top, bottom = delta_h // 2, delta_h - (delta_h // 2)
-            left, right = delta_w // 2, delta_w - (delta_w // 2)
-            # pad the image size
-            image = np.pad(image, pad_width=[(top, bottom), (left, right)], mode='constant')
-            label = np.pad(label, pad_width=[(top, bottom), (left, right)], mode='constant')
-            mask = np.pad(mask, pad_width=[(top, bottom), (left, right)], mode='constant')
-            self.images.append(image)
-            self.labels.append(label)
-            self.masks.append(mask)
-        # get image size for this dataset
-        self.dims = np.array(img_size)
-        # get patch num of each image
-        if self.use_patch:
-            self.patch_num_dim = np.ceil((self.dims - patch_size) / spacing + 1)
-            self.patch_nums = np.prod(self.patch_num_dim.astype(np.int16))
-            print("{} patches per image.".format(self.patch_nums))
+        self.total_patch_num = 0
+        # for 3D image dataset transform
+        if patch_sizes is not None and len(patch_sizes) == 3:
+            self.train_transform = tf.Compose(
+                [
+                    tf.CropForeground(k_divisible=[patch_sizes[0], patch_sizes[1], patch_sizes[2]], allow_smaller=True),
+                    tf.ToTensor()
+                ]
+            )
 
     def __len__(self):
-        if self.use_patch:
-            return len(self.images) * self.patch_nums       # number of patches
-        else:
-            return len(self.images)                         # number of subjects
+        return self.total_patch_num
 
     def __getitem__(self, index):
-        image_idx = index // self.patch_nums if self.use_patch else index
-        patch_idx = index % self.patch_nums if self.use_patch else None
-        # crop image, label and mask
-        start_coord = self.get_start_coord(patch_idx)
-        image = self.crop_image_patch(1.0 - self.images[image_idx], start_coord)
-        label = self.crop_image_patch(self.labels[image_idx], start_coord)
-        mask = self.crop_image_patch(self.masks[image_idx], start_coord)
+        # calculate the patch index is landed in which image and patch exactly
+        image_idx, patch_idx = self._calc_patch_index(index) if self.patch_sizes is not None else (index, None)
+        # load images
+        curr_subject = self.subjects[image_idx]
+        image = curr_subject['image']
+        mask = curr_subject['mask'] if 'mask' in curr_subject.keys() else None
+        label = curr_subject['label'] if 'label' in curr_subject.keys() else None
+        # get image, label and mask patch
+        if patch_idx is not None:
+            start_coord = self.get_start_coord(image_idx, image.shape, patch_idx)
+            image_patch = self.crop_image_patch(image, start_coord)
+            mask_patch = self.crop_image_patch(mask, start_coord) if mask is not None else None
+            label_patch = self.crop_image_patch(label, start_coord) if label is not None else None
+        else:
+            start_coord, image_patch, mask_patch, label_patch = None, image, mask, label
         # apply the image mask
-        image = np.multiply(image, mask)
-        # image augmentation
-        if self.augment:
-            image, label = self.flip(image, label)
-            image, label = self.rotate(image, label)
-
+        if mask_patch is not None:
+            image_patch = np.multiply(image_patch, mask_patch)
+        # image augmentation only for 2d images
+        if self.augment and label_patch is not None and len(image_patch.shape) == 2:
+            image_patch, label_patch = self.flip(image_patch, label_patch)
+            image_patch, label_patch = self.rotate(image_patch, label_patch)
         # convert to torch types
-        image = torch.from_numpy(image.copy()).unsqueeze(0)
-        label = torch.from_numpy(label.copy()).unsqueeze(0)
+        image_patch = torch.from_numpy(image_patch.copy()).unsqueeze(0)
         item = {
             'image_id': image_idx,
-            'image': image.float(),
-            'label': label.float()
+            'image': image_patch.float(),
+            'start_coord': torch.LongTensor(start_coord) if start_coord is not None else None,
+            'label': torch.from_numpy(label_patch.copy()).unsqueeze(0).float() if label_patch is not None else None
         }
-        if self.use_patch:
-            item['start_coord'] = torch.LongTensor(start_coord)
-            item['patch_id'] = patch_idx
         return item
 
-    def get_start_coord(self, patch_idx):
+    def _calc_patch_index(self, index):
+        """ Convert the global index to image and patch index """
+        image_idx = 0
+        while index >= self.subjects[image_idx]['patch_num']:
+            index -= self.subjects[image_idx]['patch_num']
+            image_idx += 1
+        patch_index = index
+        return image_idx, patch_index
+
+    def get_start_coord(self, image_idx, image_shape, patch_idx):
         """
         get the image patch's start pixel position
+        :param image_idx: index of subject
+        :param image_shape: the shape of the image, no need to pass all the images
         :param patch_idx: index of the image patch
         :return: start_coord, location of the start pixel of patch
         """
-        if patch_idx is None:
-            return None
-        start_coord = np.zeros(2)
-        for i in range(2):
-            start_coord[i] = patch_idx % self.patch_num_dim[i]
-            patch_idx = patch_idx // self.patch_num_dim[i]
-        # final start coordinate
-        start_coord = (self.spacing * start_coord).astype(np.int16)
-        end_coord = start_coord + self.patch_size
+        ndim = len(image_shape)
+        start_coord = np.zeros(ndim)
+        patch_dim = self.subjects[image_idx]['patch_dim']
+        for i in range(ndim):
+            start_coord[i] = patch_idx % patch_dim[i]
+            patch_idx = patch_idx // patch_dim[i]
+        start_coord = (self.spacings * start_coord).astype(np.int16)
+        end_coord = start_coord + self.patch_sizes
         # in case of exceed the boundaries
-        image_shape = self.dims
-        for i in range(2):
+        for i in range(ndim):
             if end_coord[i] > image_shape[i]:
                 end_coord[i] = image_shape[i]
-                start_coord[i] = end_coord[i] - self.patch_size
+                start_coord[i] = end_coord[i] - self.patch_sizes[i]
         return start_coord
 
     def crop_image_patch(self, image, start_coord):
@@ -142,11 +113,55 @@ class Dataset2D(Dataset):
         :param start_coord: location of the start pixel of patch
         :return: img_patch, image patch array
         """
-        if start_coord is None:
-            return image
-        h, w = start_coord
-        img_patch = image[h:h+self.patch_size, w:w+self.patch_size]
+        h, w = start_coord[:2]
+        d = start_coord[2] if len(image.shape) == 3 else None
+        if d is not None:
+            img_patch = image[h:h + self.patch_sizes[0], w:w + self.patch_sizes[1], d:d + self.patch_sizes[2]]
+        else:
+            img_patch = image[h:h + self.patch_sizes[0], w:w + self.patch_sizes[1]]
         return img_patch
+
+    def retinal_image_read(self, image_sizes, image_files, mask_files, label_files):
+        for i in tqdm(range(len(image_files)), ncols=80, ascii=True):
+            image = Image.open(image_files[i])
+            label = Image.open(label_files[i])
+            mask = Image.open(mask_files[i]).convert('L')
+            # resize the image or not
+            if image_sizes is not None:
+                image = image.resize(image_sizes)
+                label = label.resize(image_sizes)
+                mask = mask.resize(image_sizes)
+            image = np.asarray(image)[..., 1]           # green channel
+            label = np.asarray(label)
+            mask = np.asarray(mask)
+            # normalization of image
+            image = self.normalize(image)
+            mask = np.array(mask > 0.5).astype(float)
+            mask = binary_erosion(mask, np.ones((5, 5)))
+            # current subject
+            curr_subj = {
+                'image': - image,
+                'label': label,
+                'mask': mask
+            }
+            if self.patch_sizes is not None:
+                assert self.spacings is not None
+                patch_dim = np.ceil((np.array(image.shape) - self.patch_sizes) / self.spacings + 1).astype(int)
+                patch_num = np.prod(patch_dim)
+                curr_subj['patch_dim'] = patch_dim
+                curr_subj['patch_num'] = patch_num
+                self.total_patch_num += patch_num - 1   # minus one for the outer space adding up 1
+            self.subjects.append(curr_subj)
+            self.total_patch_num += 1
+
+    @staticmethod
+    def normalize(image, thresh=None):
+        """ Min-max normalization """
+        if thresh is not None:
+            max_val, min_val = min(thresh[0], image.max()), max(thresh[1], image.min())
+            image = np.clip(image, a_max=max_val, a_min=min_val)
+        max_val, min_val = image.max(), image.min()
+        return 2.0 * (image - min_val) / (max_val - min_val) - 1.0
 
     @staticmethod
     def flip(img_patch, gt_patch, p=0.5):
@@ -187,7 +202,7 @@ class Dataset2D(Dataset):
     @staticmethod
     def add_gaussian_noise(img_patch, p=0.5):
         """
-        add gaussian noises to the image patch
+        add gaussian noises to the image patch array
         :param img_patch: image patch array
         :param p: probability of adding the noises
         :return: img_patch, noised added patch
@@ -197,244 +212,12 @@ class Dataset2D(Dataset):
             img_patch = gaussian_noise + img_patch
         return img_patch
 
-
-class Dataset3D(Dataset):
-    def __init__(self, data_dir, data_name='TUBETK', split='train', patch_size=32, spacing=24, supervised=False):
-        self.split = split
-        self.data_name = data_name
-        self.patch_size = patch_size
-        self.spacing = spacing
-        self.supervised = supervised
-        self.total_patch_num = 0
-        self.data_dir = self.get_data_dir(data_dir)
-        # get image, mask and label files
-        self.image_files, self.mask_files, self.label_files = self.get_file_lists()
-        # load images, use file path as dict
-        self.images_dict = self.load_images()
-
-    def __len__(self):
-        return self.total_patch_num
-
-    def __getitem__(self, index):
-        # calculate the patch index is landed in which image and patch exactly
-        image_idx, patch_idx = self._calc_patch_index(index)
-        # load images
-        image_path = self.image_files[image_idx]
-        image = self.images_dict[image_path]['image']
-        image = -image if self.data_name == 'LSA' else image
-        # get image, label and mask patch
-        start_coord = self.get_start_coord(image_path, image.shape, patch_idx)
-        image_patch = self.crop_image_patch(image, start_coord)
-        '''
-        if 'mask' in self.images_dict[image_path].keys():
-            mask = self.images_dict[image_path]['mask']
-            mask_patch = self.crop_image_patch(mask, start_coord)
-            # apply the mask
-            image_patch = np.multiply(image_patch, mask_patch)
-        '''
-        # convert to torch types
-        image_patch = torch.from_numpy(image_patch.copy()).unsqueeze(0)
-        item = {
-            'image_id': image_idx,
-            'image': image_patch.float(),
-            'start_coord': torch.LongTensor(start_coord)
-        }
-        # only for dataset with dense labels and supervised learning
-        if self.supervised:
-            label = self.images_dict[image_path]['label']
-            label_patch = self.crop_image_patch(label, start_coord)
-            # convert to torch
-            label_patch = torch.from_numpy(label_patch.copy()).unsqueeze(0)
-            item['label'] = label_patch
-        return item
-
-    def get_start_coord(self, image_path, image_shape, patch_idx):
-        """
-        get the image patch's start pixel position
-        :param image_path: path to the image
-        :param image_shape: the shape of the image, no need to pass all the images
-        :param patch_idx: index of the image patch
-        :return: start_coord, location of the start pixel of patch
-        """
-        start_coord = np.zeros(3)
-        patch_num_dim = self.images_dict[image_path]['num_dim']
-        for i in range(3):
-            start_coord[i] = patch_idx % patch_num_dim[i]
-            patch_idx = patch_idx // patch_num_dim[i]
-        start_coord = (self.spacing * start_coord).astype(np.int16)
-        end_coord = start_coord + self.patch_size
-        # in case of exceed the boundaries
-        for i in range(3):
-            if end_coord[i] > image_shape[i]:
-                end_coord[i] = image_shape[i]
-                start_coord[i] = end_coord[i] - self.patch_size
-        return start_coord
-
-    def _calc_patch_index(self, index):
-        image_idx = 0
-        curr_image_path = self.image_files[image_idx]
-        while index >= self.images_dict[curr_image_path]['total_num']:
-            index -= self.images_dict[curr_image_path]['total_num']
-            image_idx += 1
-            curr_image_path = self.image_files[image_idx]
-        patch_index = index
-        return image_idx, patch_index
-
-    def get_data_dir(self, data_dir):
-        """
-        get dataset directory from the dataset name and split
-        :param data_dir: data directory
-        :return: data_dir transformed data directory
-        """
-        if self.data_name == 'TUBETK':
-            data_dir = data_dir
-        elif self.data_name == 'VESSEL12':
-            data_dir = os.path.join(data_dir, self.split)
-        elif self.data_name == '7T':
-            data_dir = os.path.join(data_dir, self.split)
-        elif self.data_name == 'LSA':
-            data_dir = data_dir
-        else:
-            data_dir = None
-        assert data_dir is not None
-        return data_dir
-
-    def get_file_lists(self):
-        """
-        get the image, mask and label files' path for later read the files
-        :return: image_files, image file path list
-                 mask_files, mask file path list
-                 label_files, label file path list
-        """
-        # get all the subject folder path
-        subject_folders = sorted(os.listdir(self.data_dir))
-        image_files, mask_files, label_files = [], [], []
-        # iterate all the folders to get the files' paths
-        for folder in subject_folders:
-            subject_path = os.path.join(self.data_dir, folder)
-            if not os.path.isdir(subject_path) or folder in ['M007', 'M008', 'mask_files']:
-                continue
-            # TubeTk Dataset
-            if self.data_name == 'TUBETK':
-                modalities = os.listdir(subject_path)
-                mra_path = os.path.join(subject_path, 'MRA')
-                mra_path = os.path.join(mra_path, os.listdir(mra_path)[0])
-                if 'AuxillaryData' in modalities:
-                    if self.split == 'train':
-                        continue
-                    else:
-                        label_path = os.path.join(subject_path, '{}_LABEL.npy'.format(folder))
-                        mask_path = os.path.join(subject_path, '{}_MASK.mha'.format(folder))
-                        image_files.append(mra_path)
-                        label_files.append(label_path)
-                        mask_files.append(mask_path)
-                if self.split == 'train':
-                    image_files.append(mra_path)
-            # Vessel12 Dataset
-            elif self.data_name == 'VESSEL12':
-                ct_path = os.path.join(subject_path, '{}.mhd'.format(folder))
-                mask_path = os.path.join(subject_path, 'mask_{}.mhd'.format(folder))
-                label_path = os.path.join(subject_path, '{}_Annotations.csv'.format(folder))
-                if label_path in os.listdir(subject_path):
-                    label_files.append(label_path)
-                image_files.append(ct_path)
-                mask_files.append(mask_path)
-            # 7-tesla Dataset
-            elif self.data_name == '7T':
-                mra_path = os.path.join(subject_path, '{}_TOF.nii.gz'.format(folder))
-                mask_path = os.path.join(subject_path, '{}_TOF_MASKED.nii.gz'.format(folder))
-                image_files.append(mra_path)
-                mask_files.append(mask_path)
-            elif self.data_name == 'LSA':
-                subject_num = int(folder.split('_')[-1])
-                image_path = os.path.join(subject_path, 'T1SPC_NLM03_{}.nii'.format(folder))
-                mask_path = os.path.join(subject_path, 'mask_{}.nii'.format(folder))
-                label_path = os.path.join(subject_path, 'label_{}.nii'.format(folder))
-                if self.split == 'train' and subject_num % 4 != 1:
-                    image_files.append(image_path)
-                    mask_files.append(mask_path)
-                    label_files.append(label_path)
-                elif self.split != 'train' and subject_num % 4 == 1:
-                    image_files.append(image_path)
-                    mask_files.append(mask_path)
-                    label_files.append(label_path)
-            else:
-                raise ValueError('Dataset Name Not Found!')
-        return image_files, mask_files, label_files
-
-    def load_images(self):
-        """
-        read all the image files, mask files and label files
-        :return: image_dict, image dict list
-        """
-        image_dict = {}
-        for i in tqdm(range(len(self.image_files))):
-            image_path = self.image_files[i]
-            image_file = SiTk.ReadImage(image_path)
-            image = SiTk.GetArrayFromImage(image_file)
-            patch_num_dim = np.ceil((np.array(image.shape) - self.patch_size) / self.spacing + 1).astype(np.int16)
-            patch_total_num = np.prod(patch_num_dim)
-            self.total_patch_num += patch_total_num
-            curr_image = {
-                'image': self.normalize(image),
-                'num_dim': patch_num_dim,
-                'total_num': patch_total_num
-            }
-            if len(self.mask_files) != 0:
-                mask_path = self.mask_files[i]
-                mask_file = SiTk.ReadImage(mask_path)
-                mask = SiTk.GetArrayFromImage(mask_file)
-                # valid_poses = np.argwhere(mask > 0)
-                # min_x, min_y, min_z = np.clip(np.min(valid_poses, axis=0) - 8, a_min=0, a_max=None)
-                # max_x, max_y, max_z = np.max(valid_poses, axis=0) + 8
-                # mask = mask[min_x:max_x, min_y:max_y, min_z:max_z]
-                # image = image[min_x:max_x, min_y:max_y, min_z:max_z]
-                assert image.shape == mask.shape
-                curr_image['mask'] = mask
-            if len(self.label_files) != 0:
-                label_path = self.label_files[i]
-                if self.data_name == 'TUBETK':
-                    label = np.load(label_path)
-                elif self.data_name == 'VESSEL12':
-                    label = self.read_csv(label_path)
-                elif self.data_name == 'LSA':
-                    label_file = SiTk.ReadImage(label_path)
-                    label = SiTk.GetArrayFromImage(label_file)
-                else:
-                    label = None
-                assert label is not None
-                curr_image['label'] = label
-            image_dict[image_path] = curr_image
-        return image_dict
-
-    def crop_image_patch(self, image, start_coord):
-        """
-        get the image patch based on the patch index
-        :param image: image numpy array
-        :param start_coord: location of the start pixel of patch
-        :return: img_patch, image patch array
-        """
-        h, w, d = start_coord
-        img_patch = image[h:h + self.patch_size, w:w + self.patch_size, d:d + self.patch_size]
-        return img_patch
-
-    def normalize(self, image):
-        if self.data_name == 'VESSEL12':
-            max_val, min_val = min(255, image.max()), max(-900, image.min())
-            image = np.clip(image, a_max=max_val, a_min=min_val)
-        elif self.data_name == 'LSA':
-            max_val, min_val = min(400, image.max()), max(0, image.min())
-            image = np.clip(image, a_max=max_val, a_min=min_val)
-        else:
-            max_val, min_val = image.max(), image.min()
-        return 2.0 * (image - min_val) / (max_val - min_val) - 1.0
-
     @staticmethod
     def read_csv(csv_file):
         """
         read cvs label files of VESSEL12 as a dictionary
-        :param csv_file: .csv file label
-        :return:label, label location dictionary
+        :param csv_file: .csv label file
+        :return: label, label location dictionary
         """
         labels = {}
         lines = open(csv_file, "r").readlines()
@@ -445,56 +228,224 @@ class Dataset3D(Dataset):
             labels[(z, y, x)] = label
         return labels
 
-    @staticmethod
-    def get_random_angle(max_angle, p):
-        if np.random.uniform() < p:
-            angles = np.random.uniform(-max_angle, max_angle, size=3)
-        else:
-            angles = np.zeros(3)
-        return angles
+
+class DriveDataset(VesselDataset):
+    def __init__(self, data_dir, image_sizes=None, train=True, patch_sizes=None, spacings=None, augment=True):
+        super(DriveDataset, self).__init__(patch_sizes, spacings, augment)
+        # get the data directories
+        split = 'train' if train else 'test'
+        mask_path = os.path.join(data_dir, split, 'mask')
+        image_path = os.path.join(data_dir, split, 'images')
+        label_path = os.path.join(data_dir, split, '1st_manual')
+        # get the image file list
+        self.mask_files = [os.path.join(mask_path, file) for file in sorted(os.listdir(mask_path))]
+        self.image_files = [os.path.join(image_path, file) for file in sorted(os.listdir(image_path))]
+        self.label_files = [os.path.join(label_path, file) for file in sorted(os.listdir(label_path))]
+        # read 2d retina images
+        self.retinal_image_read(image_sizes, self.image_files, self.mask_files, self.label_files)
+
+
+class StareDataset(VesselDataset):
+    def __init__(self, data_dir, image_sizes=None, train=True, patch_sizes=None, spacings=None, augment=True):
+        super(StareDataset, self).__init__(patch_sizes, spacings, augment)
+        # get the data directories
+        mask_path = os.path.join(data_dir, 'mask')
+        image_path = os.path.join(data_dir, 'images')
+        label_path = os.path.join(data_dir, 'labels-ah')
+        # get the image file list
+        self.mask_files = [os.path.join(mask_path, file) for file in sorted(os.listdir(mask_path))]
+        self.image_files = [os.path.join(image_path, file) for file in sorted(os.listdir(image_path))]
+        self.label_files = [os.path.join(label_path, file) for file in sorted(os.listdir(label_path))]
+        # split based on the train or test dataset
+        split_index = int(0.8 * len(self.mask_files))
+        self.mask_files = self.mask_files[:split_index] if train else self.mask_files[split_index:]
+        self.image_files = self.image_files[:split_index] if train else self.image_files[split_index:]
+        self.label_files = self.label_files[:split_index] if train else self.label_files[split_index:]
+        # read 2d retina images
+        self.retinal_image_read(image_sizes, self.image_files, self.mask_files, self.label_files)
+
+
+class HRFDataset(VesselDataset):
+    def __init__(self, data_dir, image_sizes=None, train=True, patch_sizes=None, spacings=None, augment=True):
+        super(HRFDataset, self).__init__(patch_sizes, spacings, augment)
+        # get the data directories
+        mask_path = os.path.join(data_dir, 'mask')
+        image_path = os.path.join(data_dir, 'images')
+        label_path = os.path.join(data_dir, 'manual1')
+        # get the image file list
+        self.mask_files = [os.path.join(mask_path, file) for file in sorted(os.listdir(mask_path))]
+        self.image_files = [os.path.join(image_path, file) for file in sorted(os.listdir(image_path))]
+        self.label_files = [os.path.join(label_path, file) for file in sorted(os.listdir(label_path))]
+        # split based on the train or test dataset
+        split_index = int(0.8 * len(self.mask_files))
+        self.mask_files = self.mask_files[:split_index] if train else self.mask_files[split_index:]
+        self.image_files = self.image_files[:split_index] if train else self.image_files[split_index:]
+        self.label_files = self.label_files[:split_index] if train else self.label_files[split_index:]
+        # read 2d retina images
+        self.retinal_image_read(image_sizes, self.image_files, self.mask_files, self.label_files)
+
+
+class TubeTKDataset(VesselDataset):
+    def __init__(self, data_dir, train=True, patch_sizes=(64, 64, 64), spacings=(48, 48, 48)):
+        super(TubeTKDataset, self).__init__(patch_sizes, spacings, False)
+        # get all the subject folder path
+        subject_folders = sorted(os.listdir(data_dir))
+        # iterate all the folders to load images
+        for folder in tqdm(subject_folders, ncols=80, ascii=True):
+            subject_path = os.path.join(data_dir, folder)
+            modalities = os.listdir(subject_path)
+            mra_path = os.path.join(subject_path, 'MRA')
+            mra_path = os.path.join(mra_path, os.listdir(mra_path)[0])
+            # read image
+            image = SiTk.GetArrayFromImage(SiTk.ReadImage(mra_path))
+            patch_dim = np.ceil((np.array(image.shape) - self.patch_sizes) / self.spacings + 1).astype(int)
+            patch_num = np.prod(patch_dim)
+            curr_subj = {
+                'image': self.normalize(image),
+                'patch_dim': patch_dim,
+                'patch_num': patch_num
+            }
+            if 'AuxillaryData' in modalities and not train:
+                label_path = os.path.join(subject_path, '{}_LABEL.npy'.format(folder))
+                mask_path = os.path.join(subject_path, '{}_MASK.mha'.format(folder))
+                curr_subj['label'] = np.load(label_path)
+                curr_subj['mask'] = SiTk.GetArrayFromImage(SiTk.ReadImage(mask_path))
+                self.subjects.append(curr_subj)
+                self.total_patch_num += patch_num
+            if 'AuxillaryData' not in modalities and train:
+                self.subjects.append(curr_subj)
+                self.total_patch_num += patch_num
+
+
+class Vessel12Dataset(VesselDataset):
+    def __init__(self, data_dir, train=True, patch_sizes=(64, 64, 64), spacings=(48, 48, 48)):
+        super(Vessel12Dataset, self).__init__(patch_sizes, spacings, False)
+        split = 'train' if train else 'test'
+        # get all the subject folder path
+        data_dir = os.path.join(data_dir, split)
+        subject_folders = sorted(os.listdir(data_dir))
+        # iterate all the folders to load images
+        for folder in tqdm(subject_folders, ncols=80, ascii=True):
+            subject_path = os.path.join(data_dir, folder)
+            ct_path = os.path.join(subject_path, '{}.mhd'.format(folder))
+            mask_path = os.path.join(subject_path, 'mask_{}.mhd'.format(folder))
+            label_path = os.path.join(subject_path, '{}_Annotations.csv'.format(folder))
+            # read image
+            image = SiTk.GetArrayFromImage(SiTk.ReadImage(ct_path))
+            mask = SiTk.GetArrayFromImage(SiTk.ReadImage(mask_path))
+            patch_dim = np.ceil((np.array(image.shape) - self.patch_sizes) / self.spacings + 1).astype(int)
+            patch_num = np.prod(patch_dim)
+            self.total_patch_num += patch_num
+            curr_subj = {
+                'mask': mask,
+                'image': self.normalize(image, (250, -900)),
+                'patch_dim': patch_dim,
+                'patch_num': patch_num
+            }
+            if label_path in os.listdir(subject_path):
+                curr_subj['label'] = self.read_csv(label_path)
+            self.subjects.append(curr_subj)
+
+
+class SevenTDataset(VesselDataset):
+    def __init__(self, data_dir, train=True, patch_sizes=(64, 64, 64), spacings=(48, 48, 48)):
+        super(SevenTDataset, self).__init__(patch_sizes, spacings, False)
+        split = 'train' if train else 'test'
+        # get all the subject folder path
+        data_dir = os.path.join(data_dir, split)
+        subject_folders = sorted(os.listdir(data_dir))
+        for folder in tqdm(subject_folders, ncols=80, ascii=True):
+            subject_path = os.path.join(data_dir, folder)
+            if not os.path.isdir(subject_path) or folder in ['M007', 'M008', 'mask_files']:
+                continue
+            mra_path = os.path.join(subject_path, '{}_TOF.nii.gz'.format(folder))
+            mask_path = os.path.join(subject_path, '{}_TOF_MASKED.nii.gz'.format(folder))
+            image = SiTk.GetArrayFromImage(SiTk.ReadImage(mra_path))
+            mask = SiTk.GetArrayFromImage(SiTk.ReadImage(mask_path))
+            patch_dim = np.ceil((np.array(image.shape) - patch_sizes) / spacings + 1).astype(int)
+            patch_num = np.prod(patch_dim)
+            self.total_patch_num += patch_num
+            curr_subj = {
+                'mask': mask,
+                'image': self.normalize(image),
+                'patch_dim': patch_dim,
+                'patch_num': patch_num
+            }
+            self.subjects.append(curr_subj)
+
+
+class LSADataset(VesselDataset):
+    def __init__(self, data_dir, train=True, patch_sizes=(24, 24, 24), spacings=(16, 16, 16)):
+        super(LSADataset, self).__init__(patch_sizes, spacings, False)
+        # get all the subject folder path
+        subject_folders = sorted(os.listdir(data_dir))
+        for folder in tqdm(subject_folders, ncols=80, ascii=True):
+            subject_path = os.path.join(data_dir, folder)
+            subject_num = int(folder.split('_')[-1])
+            image_path = os.path.join(subject_path, 'T1SPC_NLM03_{}.nii'.format(folder))
+            mask_path = os.path.join(subject_path, 'mask_{}.nii'.format(folder))
+            label_path = os.path.join(subject_path, 'label_{}.nii'.format(folder))
+            # read image
+            image = SiTk.GetArrayFromImage(SiTk.ReadImage(image_path))
+            mask = SiTk.GetArrayFromImage(SiTk.ReadImage(mask_path))
+            label = SiTk.GetArrayFromImage(SiTk.ReadImage(label_path))
+            patch_dim = np.ceil((np.array(image.shape) - self.patch_sizes) / self.spacings + 1).astype(int)
+            patch_num = np.prod(patch_dim)
+            curr_subj = {
+                'image': - self.normalize(image, (400, 0)),
+                'mask': mask,
+                'label': label,
+                'patch_dim': patch_dim,
+                'patch_num': patch_num
+            }
+            if train and subject_num % 4 != 1:
+                self.subjects.append(curr_subj)
+                self.total_patch_num += patch_num
+            elif not train and subject_num % 4 == 1:
+                self.subjects.append(curr_subj)
+                self.total_patch_num += patch_num
 
 
 if __name__ == '__main__':
-    # # define the datasets for unit test
-    # drive_train_path = '/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/VesselLearning/Datasets/DRIVE/train'
-    # drive_valid_path = '/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/VesselLearning/Datasets/DRIVE/test'
-    # drive_train = Dataset2D(drive_train_path, [584, 565], '1st_manual', train=True, split_idx=1000, augment=True)
-    # drive_valid = Dataset2D(drive_valid_path, [584, 565], '1st_manual', train=False, split_idx=0, augment=False)
-    # print('DRIVE: Train set size: {}; Test set size: {} '.format(len(drive_train), len(drive_valid)))
-    # print('DRIVE Patch Size is {}'.format(drive_train[0]['image'].shape))
-    #
-    # stare_path = '/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/VesselLearning/Datasets/STARE'
-    # stare_train = Dataset2D(stare_path, [605, 700], 'labels-ah', train=True, split_idx=10, augment=True)
-    # stare_valid = Dataset2D(stare_path, [605, 700], 'labels-ah', train=False, split_idx=10, augment=False)
-    # print('STARE: Train set size: {}; Test set size: {} '.format(len(stare_train), len(stare_valid)))
-    # print('STARE Patch Size is {}'.format(stare_train[0]['image'].shape))
-    #
-    # hrf_path = '/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/VesselLearning/Datasets/HRF'
-    # hrf_train = Dataset2D(hrf_path, [2336, 3504], 'manual1', train=True, split_idx=15, augment=True)
-    # hrf_valid = Dataset2D(hrf_path, [2336, 3504], 'manual1', train=False, split_idx=15, augment=False)
-    # print('HRF: Train set size: {}; Test set size: {} '.format(len(hrf_train), len(hrf_valid)))
-    # print('HRF Patch Size is {}'.format(hrf_train[0]['image'].shape))
+    # define the datasets for unit test
+    drive_path = '/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/VesselLearning/Datasets/DRIVE'
+    drive_train = DriveDataset(drive_path, train=True, augment=True)
+    drive_valid = DriveDataset(drive_path, train=False, augment=False)
+    print('DRIVE: Train set size: {}; Test set size: {} '.format(len(drive_train), len(drive_valid)))
+    print('DRIVE Patch Size is {}'.format(drive_train[0]['image'].shape))
+
+    stare_path = '/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/VesselLearning/Datasets/STARE'
+    stare_train = StareDataset(stare_path, train=True, augment=True)
+    stare_valid = StareDataset(stare_path, train=False, augment=False)
+    print('STARE: Train set size: {}; Test set size: {} '.format(len(stare_train), len(stare_valid)))
+    print('STARE Patch Size is {}'.format(stare_train[0]['image'].shape))
+
+    hrf_path = '/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/VesselLearning/Datasets/HRF'
+    hrf_train = HRFDataset(hrf_path, train=True, patch_sizes=[256, 256], spacings=[192, 192], augment=True)
+    hrf_valid = HRFDataset(hrf_path, train=False, patch_sizes=[256, 256], spacings=[192, 192], augment=False)
+    print('HRF: Train set size: {}; Test set size: {} '.format(len(hrf_train), len(hrf_valid)))
+    print('HRF Patch Size is {}'.format(hrf_train[0]['image'].shape))
 
     tubetk_path = '/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/VesselLearning/Datasets/TubeTK'
-    tubetk_train = Dataset3D(tubetk_path, data_name='TUBETK', split='train')
-    tubetk_test = Dataset3D(tubetk_path, data_name='TUBETK', split='test')
-    print('TubeTK: Train set size: {}; Test set size: {} '.format(len(tubetk_train), len(tubetk_test)))
+    tubetk_train = TubeTKDataset(tubetk_path, train=True)
+    tubetk_valid = TubeTKDataset(tubetk_path, train=False)
+    print('TubeTK: Train set size: {}; Test set size: {} '.format(len(tubetk_train), len(tubetk_valid)))
     print('TubeTK Patch Size is {}'.format(tubetk_train[0]['image'].shape))
 
     vessel12_path = '/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/VesselLearning/Datasets/vessel12'
-    vessel12_train = Dataset3D(vessel12_path, data_name='VESSEL12', split='train')
-    vessel12_test = Dataset3D(vessel12_path, data_name='VESSEL12', split='test')
-    print('VESSEL12: Train set size: {}; Test set size: {} '.format(len(vessel12_train), len(vessel12_test)))
+    vessel12_train = Vessel12Dataset(vessel12_path, train=True)
+    vessel12_valid = Vessel12Dataset(vessel12_path, train=False)
+    print('VESSEL12: Train set size: {}; Test set size: {} '.format(len(vessel12_train), len(vessel12_valid)))
     print('VESSEL12 Patch Size is {}'.format(vessel12_train[0]['image'].shape))
 
     seven_t_path = '/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/VesselLearning/Datasets/7T_Lirong/organized'
-    tof_7t_train = Dataset3D(seven_t_path, data_name='7T', split='train')
-    tof_7t_test = Dataset3D(seven_t_path, data_name='7T', split='test')
-    print('7T: Train set size: {}; Test set size: {} '.format(len(tof_7t_train), len(tof_7t_test)))
+    tof_7t_train = SevenTDataset(seven_t_path, train=True)
+    tof_7t_valid = SevenTDataset(seven_t_path, train=False)
+    print('7T: Train set size: {}; Test set size: {} '.format(len(tof_7t_train), len(tof_7t_valid)))
     print('7T Patch Size is {}'.format(tof_7t_train[0]['image'].shape))
 
     lsa_path = '/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/VesselLearning/Datasets/DarkVessels/UnilateralData'
-    lsa_train = Dataset3D(lsa_path, data_name='LSA', split='train')
-    lsa_valid = Dataset3D(lsa_path, data_name='LSA', split='test')
+    lsa_train = LSADataset(lsa_path, train=True)
+    lsa_valid = LSADataset(lsa_path, train=False)
     print('LSA: Train set size: {}; Test set size: {} '.format(len(lsa_train), len(lsa_valid)))
     print('LSA Patch Size is {}'.format(lsa_train[0]['image'].shape))

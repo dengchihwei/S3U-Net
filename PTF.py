@@ -11,30 +11,30 @@ import torch
 def construct_P(step_len, k1, k2=None):
     """
     generate propagation matrix
-    :param step_len: sample length for single step, int
+    :param step_len: sample length for single step, float
     :param k1: first curvature learnt from the network, 2D: [b, h, w]; 3D: [b, h, w, d]
-    :param k2: second curvature learnt from the network, 2D: [b, h, w]; 3D: [b, h, w, d]
+    :param k2: second curvature learnt from the network, 3D: [b, h, w, d]
     :return: P, propagation matrix, 2D: [b, h, w, 3, 3]; 3D: [b, h, w, d, 4, 4]
     """
-    k1 = k1.clone() + 1e-10
+    k1 = k1.clone() + torch.ones_like(k1) * 1e-20
     # 2d case
-    if len(k1.size()) == 3:
+    if k1.dim() == 3:
         b, h, w = k1.size()
-        skt = torch.sin(torch.mul(k1, step_len))
-        ckt = torch.cos(torch.mul(k1, step_len))
+        skt = torch.sin(k1 * step_len)
+        ckt = torch.cos(k1 * step_len)
         # construct the propagation matrix
         P = torch.zeros(b, h, w, 3, 3)
         P[:, :, :, 0, 0] = torch.ones(b, h, w)
         P[:, :, :, 0, 1] = torch.div(skt, k1)
         P[:, :, :, 0, 2] = torch.div(1.0 - ckt, k1)
         P[:, :, :, 1, 1] = ckt
-        P[:, :, :, 1, 2] = torch.div(skt, k1)
+        P[:, :, :, 1, 2] = skt
         P[:, :, :, 2, 1] = -skt
         P[:, :, :, 2, 2] = ckt
     # 3d case
     else:
-        k2 = k2.clone() + 1e-10
         b, h, w, d = k1.size()
+        k2 = k2.clone() + torch.ones_like(k2) * 1e-20
         k = torch.sqrt(k1 ** 2 + k2 ** 2)
         skt = torch.sin(torch.mul(k, step_len))
         ckt = torch.cos(torch.mul(k, step_len))
@@ -59,11 +59,11 @@ def construct_P(step_len, k1, k2=None):
 def propagate_frame(frame, step_len, k1, k2=None):
     """
     generate next frame based on current frame and curvature
-    :param frame: current parallel transport frame, shape of [b, h, w, 3, 2]
-    :param step_len: sample length for single step, int
+    :param frame: current parallel transport frame, shape of [b, h, w, 3, 2], 3D: [b, h, w, d, 4, 3]
+    :param step_len: sample length for single step, float
     :param k1: first curvature learnt from the network, 2D: [b, h, w]; 3D: [b, h, w, d]
-    :param k2: second curvature learnt from the network, 2D: [b, h, w]; 3D: [b, h, w, d]
-    :return: next frame, shape of [b, h, w, 3, 2]
+    :param k2: second curvature learnt from the network, 3D: [b, h, w, d]
+    :return: next frame, shape of [b, h, w, 3, 2], 3D: [b, h, w, d, 4, 3]
     """
     # get the P matrix
     P = construct_P(step_len, k1, k2).to(frame.device)
@@ -79,8 +79,6 @@ def propagate_frame(frame, step_len, k1, k2=None):
     next_frame = torch.bmm(P, frame)
     # recover the frame shape
     next_frame = next_frame.view(original_size)
-    # normalize the directions
-
     return next_frame
 
 
@@ -98,11 +96,19 @@ def validate(k1, k2, step_len):
 
 
 if __name__ == '__main__':
-    import torch.nn.functional as F
-    image_frame = torch.randn(4, 64, 64, 64, 4, 3)
-    image_frame = F.normalize(image_frame, dim=-1)
-    image_k1 = torch.randn(4, 64, 64, 64) * 0.0
-    image_k2 = torch.randn(4, 64, 64, 64) * 0.0
-    new_frame = propagate_frame(image_frame, 0.5, image_k1, image_k2)
-    validate(image_k1[0, 0, 0, 0], image_k2[0, 0, 0, 0], 0.5)
-    assert torch.equal(image_frame, new_frame)
+    from matplotlib import pyplot as plt
+    X = torch.tensor([0.0, 0.0])
+    T = torch.tensor([0.0, 1.0])
+    K = torch.tensor([1.0, 0.0])
+    test_frame = torch.stack([X, T, K]).repeat(1, 1, 1, 1, 1)
+    k = torch.tensor([0.0]).repeat(1, 1, 1)
+    step_size = 0.1
+    curr_frame = test_frame
+    points = []
+    for i in range(314):
+        points.append(curr_frame[0, 0, 0, 0])
+        curr_frame = propagate_frame(curr_frame, step_size, k)
+    points = torch.stack(points)
+    plt.plot(points[:, 0], points[:, 1])
+    plt.xlim([-1, 1])
+    plt.show()

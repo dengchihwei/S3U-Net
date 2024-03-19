@@ -5,104 +5,61 @@
 # @E-mail : zhiweide@usc.edu
 
 
-import os
 import torch
 import dataset
 import network
-import skimage
 import argparse
-import numpy as np
-from PIL import Image
 from tqdm import tqdm
 from train import read_json
-from loss import flux_loss_asymmetry, calc_local_contrast
+from loss import flux_loss, preproc_output
 from torch.utils.data import DataLoader
 
 
-def load_model(config, model_path, device='cpu'):
+def load_model(arguments):
+    config = read_json(arguments.configer_file)
+    checkpoint = torch.load(arguments.model_path, map_location=arguments.device)
     model = getattr(network, config['model']['type'])(**config['model']['args'])
-    # send to gpu devices
-    model = model.to(device)
-    checkpoint = torch.load(model_path, map_location=next(model.parameters()).device)
     model.load_state_dict(checkpoint['model'])
-    model.eval()
+    model.to(arguments.device).eval()
+    print('load model done')
     return model
 
 
-def ours_response_2d(config, model_path, split='train', device='cpu'):
-    # define the dataloader and model
-    config[split]['args']['augment'] = False
-    curr_loader = DataLoader(getattr(dataset, config[split]['type'])(**config[split]['args']), batch_size=1)
-    model = load_model(config, model_path, device)
-    # start to calculate the response
-    all_responses, prev_id = [], 0
-    ps = config[split]['args']['patch_size']
-    response = np.zeros(np.array(config[split]['args']['img_size']))
-    for item in tqdm(curr_loader, desc=str(0), unit='b'):
-        image_id, image = item['image_id'], item['image'].to(device)
-        x, y = item['start_coord'][0]
-        if image_id != prev_id:
-            all_responses.append(response.copy())
-            response = np.zeros(response.shape)
-            prev_id = image_id
-        with torch.no_grad():
-            output = model(image)
-            curr_res, _ = flux_loss_asymmetry(image,
-                                              output,
-                                              config['loss']['config']['flux_sample_num'],
-                                              config['loss']['config']['grad_dims'])
-            # curr_res = calc_local_contrast(image, output['radius'], config['loss']['config']['flux_sample_num'], 10)
-            patch_res = curr_res[0].cpu().detach().numpy()
-            response[x:x+ps, y:y+ps] = np.maximum(patch_res, response[x:x+ps, y:y+ps])
-    all_responses.append(response)
-    return all_responses
-
-
-def baseline_response_2d(config, method, split='train'):
-    vesselness_func = getattr(skimage.filters, method)
-    baseline_args = {'sigmas': np.linspace(0, 16, 32), 'black_ridges': True}
-    # define the dataset
-    curr_dataset = getattr(dataset, config[split]['type'])(**config[split]['args'])
-    all_responses = []
-    # baseline method response
-    for i in range(len(curr_dataset.images)):
-        image = curr_dataset.images[i]
-        response = vesselness_func(image, **baseline_args)
-        all_responses.append(response)
-    return all_responses
-
-
-def make_responses_2d(configer_file, method, model_path=None, split='train', device='cpu'):
-    # get whole configurations
-    config = read_json(configer_file)
-    if method == 'ours':
-        assert model_path is not None
-        print('Start our inference...')
-        all_responses = ours_response_2d(config, model_path, split, device)
-    else:
-        print('Start baseline enhancement...')
-        all_responses = baseline_response_2d(config, method, split)
-    # save the results image
-    print('Start saving results...')
-    os.makedirs('../tests/{}/{}'.format(method, split), exist_ok=True)
-    for i in range(len(all_responses)):
-        response = all_responses[i]
-        np.save('../tests/{}/{}/{}.npy'.format(method, split, i), response)
-        response = (response - response.min()) / (response.max() - response.min())
-        image = Image.fromarray(np.uint8(response * 255.0), 'L')
-        image.save('../tests/{}/{}/{}.jpg'.format(method, split, i))
-    print('Inference Done.')
+@torch.no_grad()
+def model_output(arguments):
+    config = read_json(arguments.configer_file)                                 # read the configer file
+    data_set = getattr(dataset, config[arguments.split]['type'])(**config[arguments.split]['args'])
+    data_loader = DataLoader(data_set, batch_size=12, shuffle=False)             # define data loaders
+    model, device = load_model(arguments), arguments.device                     # define model and device
+    optimal_dirs, estimated_rads, responses = [], [], []                        # network output list
+    # start inference
+    count = 0
+    for batch in tqdm(data_loader, desc=str(0), unit='b'):
+        images = batch['image'].to(device)
+        output = model(images)
+        curr_res, _ = flux_loss(images, output, config['loss']['config']['flux_sample_num'])
+        curr_dir, curr_rad = preproc_output(output)
+        optimal_dirs.append(curr_dir)
+        estimated_rads.append(curr_rad)
+        responses.append(curr_res.unsqueeze(1))
+        count += 1
+        if count == 1:
+            break
+    return optimal_dirs, estimated_rads, responses
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('-c', '--config_file', type=str, default='./configs/drive/adaptive_lc.json')
+parser.add_argument('-c', '--configer_file', type=str, default='./configs/drive/adaptive_lc.json')
+parser.add_argument('-p', '--model_path', type=str, default='../trained_models/DRIVE_ADAPTIVE_LC/2023-09-13/' +
+                                                            'ADAPTIVE_LC-300-epoch-2023-09-13.pt')
+parser.add_argument('-d', '--device', type=str, default='cuda:1')
 parser.add_argument('-s', '--split', type=str, default='valid')
-parser.add_argument('-d', '--device', type=str, default='cuda:2')
-parser.add_argument('-p', '--model_path', type=str, default='../trained_models/ADAPTIVE_LC/2023-06-22/' +
-                                                            'ADAPTIVE_LC-300-epoch-2023-06-22.pt')
-parser.add_argument('-m', '--method', type=str, default='ours')
 
 
 if __name__ == '__main__':
     args = parser.parse_args()
-    make_responses_2d(args.config_file, args.method, args.model_path, args.split, args.device)
+    optimal_dir_list, _, _ = model_output(args)
+    for i in range(10):
+        for x in range(33, 39):
+            for y in range(1, 127):
+                print(x, y, optimal_dir_list[0][i, x, y])

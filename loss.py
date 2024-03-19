@@ -248,7 +248,8 @@ def flux_loss(image, output, sample_num):
         # find the min responses of the two dirs
         response += torch.maximum(res1, res2) * 2 / sample_num
     response = torch.clip(- torch.sum(response[..., 1:], dim=-1), min=0.0)  # clip the response by 0, [B, H, W, D]
-    response = torch.mul(response, 1.0 + output['attention']) if 'attention' in output.keys() else response
+    if 'attentions' in output.keys():
+        response = torch.mul(response, 1.0 + output['attentions'][-1])
     mean_flux_loss = - response.mean()                                      # use negative loss to maximize this
     return response, mean_flux_loss
 
