@@ -33,8 +33,7 @@ class VesselDataset(Dataset):
         if patch_sizes is not None and len(patch_sizes) == 3:
             self.train_transform = tf.Compose(
                 [
-                    tf.CropForeground(k_divisible=[patch_sizes[0], patch_sizes[1], patch_sizes[2]], allow_smaller=True),
-                    tf.ToTensor()
+                    tf.CropForeground(k_divisible=[patch_sizes[0], patch_sizes[1], patch_sizes[2]], allow_smaller=True)
                 ]
             )
 
@@ -47,8 +46,8 @@ class VesselDataset(Dataset):
         # load images
         curr_subject = self.subjects[image_idx]
         image = curr_subject['image']
-        mask = curr_subject['mask'] if 'mask' in curr_subject.keys() else None
-        label = curr_subject['label'] if 'label' in curr_subject.keys() else None
+        mask = curr_subject['mask'] > 0.001 if 'mask' in curr_subject.keys() else None
+        label = curr_subject['label'] > 0.5 if 'label' in curr_subject.keys() else None
         # get image, label and mask patch
         if patch_idx is not None:
             start_coord = self.get_start_coord(image_idx, image.shape, patch_idx)
@@ -58,7 +57,7 @@ class VesselDataset(Dataset):
         else:
             start_coord, image_patch, mask_patch, label_patch = None, image, mask, label
         # apply the image mask
-        if mask_patch is not None:
+        if mask_patch is not None and len(image_patch.shape) == 2:
             image_patch = np.multiply(image_patch, mask_patch)
         # image augmentation only for 2d images
         if self.augment and label_patch is not None and len(image_patch.shape) == 2:
@@ -68,10 +67,12 @@ class VesselDataset(Dataset):
         image_patch = torch.from_numpy(image_patch.copy()).unsqueeze(0)
         item = {
             'image_id': image_idx,
-            'image': image_patch.float(),
-            'start_coord': torch.LongTensor(start_coord) if start_coord is not None else None,
-            'label': torch.from_numpy(label_patch.copy()).unsqueeze(0).float() if label_patch is not None else None
+            'image': image_patch.float()
         }
+        if start_coord is not None:
+            item['start_coord'] = torch.LongTensor(start_coord)
+        if label_patch is not None:
+            item['label'] = torch.from_numpy(label_patch.copy()).unsqueeze(0).float()
         return item
 
     def _calc_patch_index(self, index):
@@ -362,6 +363,14 @@ class SevenTDataset(VesselDataset):
             mask_path = os.path.join(subject_path, '{}_TOF_MASKED.nii.gz'.format(folder))
             image = SiTk.GetArrayFromImage(SiTk.ReadImage(mra_path))
             mask = SiTk.GetArrayFromImage(SiTk.ReadImage(mask_path))
+            # crop the valid sizes
+            if train:
+                valid_poses = np.argwhere(mask > 0)
+                min_x, min_y, min_z = np.clip(np.min(valid_poses, axis=0) - 8, a_min=0, a_max=None)
+                max_x, max_y, max_z = np.max(valid_poses, axis=0) + 8
+                mask = mask[min_x:max_x, min_y:max_y, min_z:max_z]
+                image = image[min_x:max_x, min_y:max_y, min_z:max_z]
+            assert image.shape == mask.shape
             patch_dim = np.ceil((np.array(image.shape) - patch_sizes) / spacings + 1).astype(int)
             patch_num = np.prod(patch_dim)
             self.total_patch_num += patch_num

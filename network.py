@@ -9,7 +9,7 @@ import torch
 import numpy as np
 import torch.nn as nn
 from torch.nn import functional as F
-from loss import calc_local_contrast
+from loss import calc_local_contrast, vessel_loss
 
 
 # following parts are components of 2D-UNet
@@ -280,8 +280,8 @@ class UNet2D(nn.Module):
         self.radius_conv = nn.Conv2d(feat_dims[0], radius_num, 1)
         Initializer.weights_init(self)
 
-    def forward(self, x):
-        x1 = self.encoder1(x)
+    def forward(self, im, loss_config):
+        x1 = self.encoder1(im)
         x2 = self.encoder2(x1)
         x3 = self.encoder3(x2)
         x4 = self.encoder4(x3)
@@ -298,7 +298,9 @@ class UNet2D(nn.Module):
             'radius': radius,
             'recon': recon
         }
-        return output
+        # calculate the losses
+        losses = vessel_loss(im, output, loss_config)
+        return losses
 
 
 class LocalContrastNet2D(nn.Module):
@@ -330,7 +332,7 @@ class LocalContrastNet2D(nn.Module):
         # self.radius_conv = OutConv(feat_dims[0], 128, radius_num, size=1, pad=0)
         Initializer.weights_init(self)
 
-    def forward(self, im):
+    def forward(self, im, loss_config):
         # encoding
         x1 = self.encoder1(im)
         x2 = self.encoder2(x1)
@@ -364,7 +366,9 @@ class LocalContrastNet2D(nn.Module):
             'vessel': direction,
             'attentions': attentions,
         }
-        return output
+        # calculate the losses
+        losses = vessel_loss(im, output, loss_config)
+        return losses
 
 
 class UNet3D(nn.Module):
@@ -387,7 +391,7 @@ class UNet3D(nn.Module):
         self.radius_conv = nn.Conv3d(feat_dims[0], radius_num, 1)
         Initializer.weights_init(self)
 
-    def forward(self, im):
+    def forward(self, im, loss_config):
         x1 = self.encoder1(im)
         x2 = self.encoder2(x1)
         x3 = self.encoder3(x2)
@@ -405,7 +409,9 @@ class UNet3D(nn.Module):
             'radius': radius,
             'recon': recon
         }
-        return output
+        # calculate the losses
+        losses = vessel_loss(im, output, loss_config)
+        return losses
 
 
 class LocalContrastNet3D(nn.Module):
@@ -435,7 +441,7 @@ class LocalContrastNet3D(nn.Module):
         self.radius_conv = nn.Conv3d(feat_dims[0], radius_num, 1)
         Initializer.weights_init(self)
 
-    def forward(self, im):
+    def forward(self, im, loss_config):
         # encoding
         x1 = self.encoder1(im)
         x2 = self.encoder2(x1)
@@ -469,7 +475,9 @@ class LocalContrastNet3D(nn.Module):
             'vessel': direction,
             'attentions': attentions
         }
-        return output
+        # calculate the losses
+        losses = vessel_loss(im, output, loss_config)
+        return losses
 
 
 if __name__ == '__main__':

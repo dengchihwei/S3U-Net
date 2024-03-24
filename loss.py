@@ -207,8 +207,8 @@ def calc_dir_response(curr_dir, curr_rad, gradients, basis, grid_base):
     """ Step 2. Grid sample the gradients based on the sample grid and project on the basis """
     sampled_gradients = grid_sample(gradients, sample_grid, permute=True)           # [B, H, W, D, 3/2, 3/2]
     """ Step 3. Project the sampled gradients on the basis """
-    projected_gradients = torch.sum(torch.mul(sampled_gradients, basis), dim=-1)    # [B, H, W, D, 3/2]
-    flux = torch.mul(projected_gradients.unsqueeze(-1), basis)                      # [B, H, W, D, 3/2, 3/2]
+    flux = torch.sum(torch.mul(sampled_gradients, basis), dim=-1)                   # [B, H, W, D, 3/2]
+    flux = torch.mul(flux.unsqueeze(-1), basis)                                     # [B, H, W, D, 3/2, 3/2]
     """ Step 4. Project the flux on the sample direction  """
     flux = torch.sum(torch.mul(flux, curr_dir), dim=-1)                             # [B, H, W, D, 3/2]
     return flux
@@ -250,8 +250,7 @@ def flux_loss(image, output, sample_num):
     response = torch.clip(- torch.sum(response[..., 1:], dim=-1), min=0.0)  # clip the response by 0, [B, H, W, D]
     if 'attentions' in output.keys():
         response = torch.mul(response, 1.0 + output['attentions'][-1])
-    mean_flux_loss = - response.mean()                                      # use negative loss to maximize this
-    return response, mean_flux_loss
+    return response
 
 
 def continuity_loss(image, output, flux_response, sample_num):
@@ -272,18 +271,15 @@ def continuity_loss(image, output, flux_response, sample_num):
     opt_dir_scaled = torch.mul(opt_dir, mean_rad)                           # [B, H, W, D, 3]
     """ Step 3. Get the base sampling grid """
     grid_base = sample_space_to_image_space(get_grid_base(image))           # convert to [0, H], [B, H, W, D, 3]
-    """ Step 4. Direction Loss """
+    """ Step 4. Direction Loss / Intensity Continuity Loss """
     direction_loss = 0.0
+    intensity_loss = 0.0
+    flux_response = flux_response.unsqueeze(1)
     for scale in torch.linspace(-1.0, 1.0, sample_num):
         curr_grid = image_space_to_sample_space(grid_base + opt_dir_scaled * scale)
         sampled_opt_dir = grid_sample(output['vessel'], curr_grid)
         similarity = F.cosine_similarity(output['vessel'], sampled_opt_dir)
         direction_loss -= torch.min(similarity, similarity * 0).mean() / sample_num
-    """ Step 5. Intensity Continuity Loss """
-    intensity_loss = 0.0
-    flux_response = flux_response.unsqueeze(1)
-    for scale in torch.linspace(-1.0, 1.0, sample_num):
-        curr_grid = image_space_to_sample_space(grid_base + opt_dir_scaled * scale)
         sampled_response = grid_sample(flux_response, curr_grid)
         intensity_loss += F.mse_loss(flux_response, sampled_response) / sample_num
     return direction_loss, intensity_loss
@@ -370,52 +366,6 @@ def attention_loss(output, mean_val):
     return att_loss
 
 
-def vessel_loss(image, output, loss_config):
-    """
-    Aggregate all the vessel loss
-    :param image: original image [B, 1, H, W] / [B, 1, H, W, D]
-    :param output: output dictionary 'vessel', 'radius', 'recon', 'attention'
-    :param loss_config: dict, store the loss configurations
-    :return: losses: dict, store the losses
-    """
-    """ Step 1. Calculate the flux loss """
-    lambda_flux = loss_config['lambda_flux']
-    flux_sample_num = loss_config['flux_sample_num']
-    flux_response, mean_flux_loss = flux_loss(image, output, flux_sample_num)
-    mean_flux_loss = lambda_flux * mean_flux_loss
-    """ Step 2. Calculate the continuity loss """
-    lambda_direction = loss_config['lambda_direction']
-    lambda_intensity = loss_config['lambda_intensity']
-    sample_num = loss_config['sample_num']
-    # step_len = loss_config['step_len']
-    # propagate_sample_num = loss_config['propagate_sample_num']
-    # direction_loss, intensity_loss = ptf_loss(image, output, flux_response, propagate_sample_num, step_len)
-    direction_loss, intensity_loss = continuity_loss(image, output, flux_response, sample_num)
-    direction_loss, intensity_loss = lambda_direction * direction_loss, lambda_intensity * intensity_loss
-    """ Step 3. Calculate the reconstruction loss """
-    lambda_recon = loss_config['lambda_recon']
-    reconstruct_loss = lambda_recon * recon_loss(image, output)
-    """ Step 4. Aggregate the total losses """
-    total_loss = mean_flux_loss + reconstruct_loss + direction_loss + intensity_loss
-    losses = {
-        'flux_loss': mean_flux_loss,
-        'dirs_loss': direction_loss,
-        'ints_loss': intensity_loss,
-        'rcon_loss': reconstruct_loss,
-        'total_loss': total_loss
-    }
-    if 'attentions' in output.keys():
-        mean_exposure = loss_config['mean_exp']
-        if mean_exposure != 0:
-            lambda_attention = loss_config['lambda_attention']
-            mean_att_loss = lambda_attention * attention_loss(output, mean_exposure)
-            total_loss += mean_att_loss
-            losses['attn_loss'] = mean_att_loss
-            losses['total_loss'] = total_loss
-    # print(losses['total_loss'])
-    return losses
-
-
 def calc_local_contrast(image, estimated_r, sample_num, scale_steps):
     b, c, h, w = image.shape[:4]                                    # 2D image [B, C, H, W] / 3D image [B, C, H, W, D]
     d = image.shape[4] if image.dim() == 5 else None
@@ -435,11 +385,11 @@ def calc_local_contrast(image, estimated_r, sample_num, scale_steps):
         img_contrast_o = torch.zeros(b, c, h, w).to(estimated_r.device)
 
     shift = int(sample_num / 2)
-    for i in range(scale_steps):                                    # loop over the sampling scales
+    for i in range(scale_steps):                                            # loop over the sampling scales
         scale_i, scale_o = inside_scales[i], outside_scales[i]
-        for j in range(shift):                                      # loop over the sampling directions
+        for j in range(shift):                                              # loop over the sampling directions
             k = j + shift
-            sample_dir1, sample_dir2 = sample_vecs[j], sample_vecs[k]   # this is a 2d / 3d vector
+            sample_dir1, sample_dir2 = sample_vecs[j], sample_vecs[k]       # this is a 2d / 3d vector
             curr_rad1 = estimated_r[..., j:j+1] if estimated_r.size(-1) > 1 else estimated_r
             curr_rad2 = estimated_r[..., k:k+1] if estimated_r.size(-1) > 1 else estimated_r
             # get sample grids of the inside and outside for both directions
@@ -455,11 +405,45 @@ def calc_local_contrast(image, estimated_r, sample_num, scale_steps):
             # adding the image local contrasts
             img_contrast_i += torch.mul(sampled_img_pos_i, sampled_img_neg_i) / sample_num / scale_steps
             img_contrast_o += torch.mul(sampled_img_pos_o, sampled_img_neg_o) / sample_num / scale_steps
+        # del sampled_img_pos_i, sampled_img_neg_i, sampled_img_pos_o, sampled_img_neg_o
     # compute the inside / outside ratio
-    # img_contrast_i = torch.mean(img_contrast_i, dim=0)
-    # img_contrast_o = torch.mean(img_contrast_o, dim=0)
     epsilon = 3e-2 if d else 1e-4
     img_local_contrast = torch.div(img_contrast_o, img_contrast_i + epsilon) - 1.0
     # regularization or not
     img_local_contrast = torch.sigmoid(img_local_contrast)
     return img_local_contrast
+
+
+def vessel_loss(image, output, loss_config):
+    """
+    Aggregate all the vessel loss
+    :param image: original image [B, 1, H, W] / [B, 1, H, W, D]
+    :param output: output dictionary 'vessel', 'radius', 'recon', 'attention'
+    :param loss_config: dict, store the loss configurations
+    :return: losses: dict, store the losses
+    """
+    # flux loss
+    flux_response = flux_loss(image, output, loss_config['flux_sample_num'])
+    mean_flux_loss = - flux_response.mean() * loss_config['lambda_flux']    # use negative loss to maximize this
+    # continuity loss
+    direction_loss, intensity_loss = continuity_loss(image, output, flux_response, loss_config['sample_num'])
+    direction_loss = direction_loss * loss_config['lambda_direction']
+    intensity_loss = intensity_loss * loss_config['lambda_intensity']
+    # reconstruction loss
+    reconstruct_loss = recon_loss(image, output) * loss_config['lambda_recon']
+    # aggregate loss
+    total_loss = mean_flux_loss + reconstruct_loss + direction_loss + intensity_loss
+    losses = {
+        'flux_loss': mean_flux_loss.unsqueeze(0),
+        'dirs_loss': direction_loss.unsqueeze(0),
+        'ints_loss': intensity_loss.unsqueeze(0),
+        'rcon_loss': reconstruct_loss.unsqueeze(0)
+    }
+    # attention loss
+    if 'lambda_attention' in loss_config.keys() and 'attentions' in output.keys():
+        mean_exposure = loss_config['mean_exp']
+        mean_att_loss = attention_loss(output, mean_exposure) * loss_config['lambda_attention']
+        total_loss += mean_att_loss
+        losses['attn_loss'] = mean_att_loss.unsqueeze(0)
+    losses['total_loss'] = total_loss.unsqueeze(0)
+    return losses
