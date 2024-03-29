@@ -2,13 +2,13 @@
   "name": "DRIVE_ADAPTIVE_LC",
   "data": {
     "type": "DriveDataset",
-    "batch_size": 88,
+    "batch_size": 4,
     "args": {
       "data_dir": "/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/VesselLearning/Datasets/DRIVE/",
       "image_sizes": null,
       "train": true,
-      "patch_sizes": [128, 128],
-      "spacings": [96, 96],
+      "patch_sizes": [256, 256],
+      "spacings": [192, 192],
       "augment": true
     }
   },
@@ -18,7 +18,7 @@
       "in_ch": 1,
       "out_ch": 2,
       "min_scale": 0.5,
-      "max_scale": 15.5,
+      "max_scale": 14.5,
       "radius_num": 128,
       "feat_dims": [64, 128, 256, 512]
     }
@@ -36,20 +36,20 @@
   },
   "trainer": {
     "train_type": "ADAPTIVE_LC",
-    "gpu_device_num": 4,
+    "gpu_device_num": 1,
     "epoch_num": 2000,
-    "save_period": 5,
+    "save_period": 10,
     "resume": false,
     "resume_path": "None",
     "checkpoint_dir": "/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/ConnectVessel/trained_models/DRIVE"
   },
   "loss": {
     "lambda_flux": 5.0,
-    "lambda_recon": 1.0,
+    "lambda_recon": 0.2,
     "lambda_direction": 1.0,
     "lambda_intensity": 1.0,
     "flux_sample_num": 128,
-    "sample_num": 16,
+    "sample_num": 32,
     "lambda_attention": 1.0,
     "mean_exp": 0.15
   }

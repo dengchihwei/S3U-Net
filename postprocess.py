@@ -114,14 +114,19 @@ def model_tube(response, init_frame, mean_rad, probe_num, sample_pt_num, step_le
     return response_prior, final_path
 
 
-def get_image_coord(image):
+def get_image_coord(image, h=None, w=None, d=None):
     """
     Generate the image coordinates from the image size
     :param image: 2D image [B, H, W, 2], 3D image [B, H, W, D, 3].
+    :param h: Height of the image
+    :param w: Width of the image
+    :param d: Depth of the image
     :return: grid, 2D image [B, H, W, 2], 3D image [B, H, W, D, 3].
     """
-    b, c, h, w = image.shape[:4]
-    d = image.shape[4] if image.dim() == 5 else None
+    b, c = image.shape[:2]
+    if h is None:
+        h, w = image.shape[2:4]
+        d = image.shape[4] if image.dim() == 5 else None
     dh = torch.linspace(-1.0, 1.0, h)
     dw = torch.linspace(-1.0, 1.0, w)
     if d:
@@ -160,7 +165,7 @@ def get_rotation_matrix_3d(src_dir, des_dir):
 
 def get_local_frame(optimal_dir):
     """
-    Compute the local frame based on the optimal direction
+    Compute the local frame based on the optimal dir
     :param optimal_dir: Optimal direction, 2D image [B, H, W, 2], 3D image [B, H, W, D, 3]
     :return: local frames, 2D image [B, H, W, 2, 2], 3D image [B, H, W, D, 3, 3]
     """
@@ -226,10 +231,10 @@ parser.add_argument('-s', '--split', type=str, default='valid')
 
 if __name__ == '__main__':
     args = parser.parse_args()
-    param_dict = {
+    _param_dict = {
         'sample_num': 1000,
         'prob_num': 10,
         'sample_pt_num': 5,
         'step_len': 0.125
     }
-    post_proc_pipline(args, param_dict)
+    post_proc_pipline(args, _param_dict)

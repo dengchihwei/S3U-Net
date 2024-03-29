@@ -2,7 +2,7 @@
   "name": "LSA_ADAPTIVE_LC",
   "data": {
     "type": "LSADataset",
-    "batch_size": 2,
+    "batch_size": 6,
     "args": {
       "data_dir": "/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/VesselLearning/Datasets/DarkVessels/UnilateralData",
       "patch_sizes": [48, 48, 48],
@@ -16,7 +16,7 @@
       "in_ch": 1,
       "out_ch": 3,
       "min_scale": 0.5,
-      "max_scale": 15.5,
+      "max_scale": 10.5,
       "radius_num": 128,
       "feat_dims": [64, 128, 256, 512]
     }
@@ -34,8 +34,8 @@
   },
   "trainer": {
     "train_type": "ADAPTIVE_LC",
-    "gpu_device_num": 1,
-    "epoch_num": 100,
+    "gpu_device_num": 2,
+    "epoch_num": 200,
     "save_period": 1,
     "resume": false,
     "resume_path": "None",
@@ -47,6 +47,6 @@
     "lambda_direction": 1.0,
     "lambda_intensity": 1.0,
     "flux_sample_num": 128,
-    "sample_num": 16
+    "sample_num": 32
   }
 }

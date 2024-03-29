@@ -139,8 +139,10 @@ class VesselDataset(Dataset):
             image = self.normalize(image)
             mask = np.array(mask > 0.5).astype(float)
             mask = binary_erosion(mask, np.ones((5, 5)))
+            subject_name = image_files[i].split('/')[-1].split('.')[0]
             # current subject
             curr_subj = {
+                'subject_name': subject_name,
                 'image': - image,
                 'label': label,
                 'mask': mask
@@ -401,11 +403,13 @@ class LSADataset(VesselDataset):
             patch_dim = np.ceil((np.array(image.shape) - self.patch_sizes) / self.spacings + 1).astype(int)
             patch_num = np.prod(patch_dim)
             curr_subj = {
+                'subject_name': folder,
                 'image': - self.normalize(image, (400, 0)),
                 'mask': mask,
                 'label': label,
                 'patch_dim': patch_dim,
-                'patch_num': patch_num
+                'patch_num': patch_num,
+                'meta_data': SiTk.ReadImage(mask_path)
             }
             if train and subject_num % 4 != 1:
                 self.subjects.append(curr_subj)

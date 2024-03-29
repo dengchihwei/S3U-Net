@@ -56,20 +56,20 @@ class Trainer(object):
         logger = Logger(log_filename)
         return logger
 
-    def get_data_loader(self, train=True):
+    def get_data_loader(self, train=True, shuffle=True):
         # determine it is for training or validation
         if train:
-            b, s, d = self.dataset_conf['batch_size'], True, True
+            b, d = self.dataset_conf['batch_size'], True
             self.dataset_conf['args']['train'] = True
         else:
-            b, s, d = 1, False, False
+            b, shuffle, d = 1, False, False
             self.dataset_conf['args']['train'] = False
         # get the dataset and data loader
         if hasattr(dataset, self.dataset_conf['type']):
             _dataset = getattr(dataset, self.dataset_conf['type'])(**self.dataset_conf['args'])
         else:
             raise ValueError('The Dataset Name is NOT VALID')
-        data_loader = DataLoader(_dataset, batch_size=b, shuffle=s, num_workers=0, drop_last=d)
+        data_loader = DataLoader(_dataset, batch_size=b, shuffle=shuffle, num_workers=0, drop_last=d)
         return data_loader
 
     def get_model(self):
@@ -147,7 +147,7 @@ class Trainer(object):
             images = batch['image'].cuda()
 
             # losses from loss function
-            batch_losses = self.model(images, self.loss_conf)
+            _, batch_losses = self.model(images, self.loss_conf)
 
             # first batch initialization loss
             if idx == 0:
@@ -282,7 +282,7 @@ def read_json(config_file):
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('-c', '--config_file', type=str, default='./configs/lsa/adaptive_lc.json')
+parser.add_argument('-c', '--config_file', type=str, default='./configs/drive/adaptive_lc.json')
 
 
 if __name__ == '__main__':
