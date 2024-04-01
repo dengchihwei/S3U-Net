@@ -17,12 +17,12 @@ from train import read_json, Trainer
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--data', type=str, default='DRIVE')
-parser.add_argument('--split', type=str, default='train')
+parser.add_argument('--split', type=str, default='valid')
 parser.add_argument('--method', type=str, default='LCN')
 parser.add_argument('--device', type=str, default='cuda:0')
 parser.add_argument('--config_file', type=str, default='./configs/drive/adaptive_lc.json')
 parser.add_argument('--model_path', type=str,
-                    default='../trained_models/DRIVE/DRIVE_ADAPTIVE_LC/2024-03-25-01/ADAPTIVE_LC-500-epoch.pth')
+                    default='../trained_models/DRIVE/DRIVE_ADAPTIVE_LC/2024-03-25-01/ADAPTIVE_LC-1000-epoch.pth')
 
 
 def model_output(args):
@@ -34,6 +34,7 @@ def model_output(args):
     trainer = Trainer(config_file=args.config_file)
 
     # create the model and load parameters
+    trainer.trainer_conf['gpu_device_num'] = 1
     model = trainer.get_model()
     model.load_state_dict(checkpoint['model'])
     model.to(args.device).eval()
@@ -41,8 +42,8 @@ def model_output(args):
 
     # get the data loaders
     trainer.dataset_conf['batch_size'] = 1
-    if 'augment' in trainer.dataset_conf.keys():
-        trainer.dataset_conf['augment'] = False
+    if 'augment' in trainer.dataset_conf['args'].keys():
+        trainer.dataset_conf['args']['augment'] = False
     data_loader = trainer.get_data_loader(train=(args.split == 'train'), shuffle=False)
 
     # start inference
@@ -51,7 +52,7 @@ def model_output(args):
     flux_list, dirs_list, rads_list = [], [], []
     px, py = data_loader.dataset.patch_sizes[:2]
     pz = data_loader.dataset.patch_sizes[2] if len(data_loader.dataset.patch_sizes) == 3 else None
-    for batch in tqdm(data_loader, desc=str(0), unit='b'):
+    for batch in tqdm(data_loader, ncols=80, ascii=True, desc='Inference: '):
         curr_image_id = batch['image_id']
         if curr_image_id != prev_image_id:
             if prev_image_id != -1:
@@ -90,23 +91,26 @@ def model_output(args):
     rads_list.append(rads.copy())
 
     # save the results lists to files
-    os.makedirs("../tests/{}_{}_{}".format(args.data, args.method, args.split), exist_ok=True)
+    os.makedirs("../tests/{}/{}_{}".format(args.data, args.method, args.split), exist_ok=True)
+    os.makedirs("../tests/{}/{}_{}/rads".format(args.data, args.method, args.split), exist_ok=True)
+    os.makedirs("../tests/{}/{}_{}/dirs".format(args.data, args.method, args.split), exist_ok=True)
+    os.makedirs("../tests/{}/{}_{}/flux".format(args.data, args.method, args.split), exist_ok=True)
     assert len(flux_list) == len(dirs_list) == len(rads_list) == len(data_loader.dataset.subjects)
     for i in range(len(flux_list)):
         mask = data_loader.dataset.subjects[i]['mask']
         subject_name = data_loader.dataset.subjects[i]['subject_name']
-        rads_path = '../tests/{}_{}_{}/rads_{}.npy'.format(args.data, args.method, args.split, subject_name)
-        dirs_path = '../tests/{}_{}_{}/dirs_{}.npy'.format(args.data, args.method, args.split, subject_name)
+        rads_path = '../tests/{}/{}_{}/rads/rads_{}.npy'.format(args.data, args.method, args.split, subject_name)
+        dirs_path = '../tests/{}/{}_{}/dirs/dirs_{}.npy'.format(args.data, args.method, args.split, subject_name)
         np.save(rads_path, rads_list[i])
         np.save(dirs_path, dirs_list[i])
         if len(flux_list[i].shape) == 3:
-            flux_path = '../tests/{}_{}_{}/flux_{}.nii.gz'.format(args.data, args.method, args.split, subject_name)
+            flux_path = '../tests/{}/{}_{}/flux/flux_{}.nii.gz'.format(args.data, args.method, args.split, subject_name)
             meta_data = data_loader.dataset.subjects[i]['meta_data']
             flux_image = sitk.GetImageFromArray(np.multiply(flux_list[i], mask))
             flux_image.CopyInformation(meta_data)
             sitk.WriteImage(flux_image, flux_path)
         else:
-            flux_path = '../tests/{}_{}_{}/flux_{}.npy'.format(args.data, args.method, args.split, subject_name)
+            flux_path = '../tests/{}/{}_{}/flux/flux_{}.npy'.format(args.data, args.method, args.split, subject_name)
             np.save(flux_path, np.multiply(flux_list[i], mask))
         print('Model Results Saved at {}'.format(flux_path))
 

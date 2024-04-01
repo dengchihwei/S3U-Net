@@ -13,7 +13,9 @@ import monai.transforms as tf
 from PIL import Image
 from tqdm import tqdm
 from torch.utils.data import Dataset
-from scipy.ndimage import binary_erosion
+from scipy.ndimage import generic_filter
+from skimage.filters import gaussian
+from skimage.morphology import binary_erosion, binary_dilation, binary_closing, remove_small_objects, skeletonize
 
 
 class VesselDataset(Dataset):
@@ -390,7 +392,7 @@ class LSADataset(VesselDataset):
         super(LSADataset, self).__init__(patch_sizes, spacings, False)
         # get all the subject folder path
         subject_folders = sorted(os.listdir(data_dir))
-        for folder in tqdm(subject_folders, ncols=80, ascii=True):
+        for folder in tqdm(subject_folders, ncols=80, ascii=True, desc='Loading Data: '):
             subject_path = os.path.join(data_dir, folder)
             subject_num = int(folder.split('_')[-1])
             image_path = os.path.join(subject_path, 'T1SPC_NLM03_{}.nii'.format(folder))
@@ -419,46 +421,241 @@ class LSADataset(VesselDataset):
                 self.total_patch_num += patch_num
 
 
+class LineEndDataset(Dataset):
+    def __init__(self, patch_size, threshold, min_size, augment=False):
+        """
+        abstract class for line end connection
+        :param patch_size: size of patches to crop the features
+        :param threshold: threshold to binarize the flux response
+        :param min_size: minimum size of connected components to remove
+        :param augment: augmentation only for 2D datasets
+        """
+        self.subjects = []
+        self.line_end_locs = []
+        self.patch_size = patch_size
+        self.threshold = threshold
+        self.min_size = min_size
+        self.augment = augment
+
+    def __len__(self):
+        return len(self.line_end_locs)
+
+    def __getitem__(self, index):
+        # crop the image features
+        image_idx, end_loc = self.line_end_locs[index]
+        flux_patch = self.crop_feature(self.subjects[image_idx]['flux'], end_loc)
+        dirs_patch = self.crop_feature(self.subjects[image_idx]['dirs'], end_loc)
+        rads_patch = self.crop_feature(self.subjects[image_idx]['rads'], end_loc)
+        if 'mask' in self.subjects[image_idx].keys():
+            mask_patch = self.crop_feature(self.subjects[image_idx]['mask'] > 0.5, end_loc)
+            flux_patch = np.multiply(flux_patch, mask_patch)
+        if self.augment and len(flux_patch.shape) == 2:
+            flux_patch = self.flip(flux_patch)
+            flux_patch = self.rotate(flux_patch)
+        # convert to torch types
+        item = {
+            'image_id': image_idx,
+            'end_loc': torch.from_numpy(end_loc.copy()).unsqueeze(0).float(),
+            'flux': torch.from_numpy(flux_patch.copy()).float(),
+            'dirs': torch.from_numpy(dirs_patch.copy()).float(),
+            'rads': torch.from_numpy(rads_patch.copy()).float()
+        }
+        return item
+
+    def crop_feature(self, feature, end_loc):
+        """
+        crop the features centered as the line end locations
+        :param feature: image features shape of [C, H, W], [C, H, W, D]
+        :param end_loc: locations of line end
+        :return: cropped the features [C, PS, PS], [C, PS, PS, PS]
+        """
+        pad_size = (self.patch_size, self.patch_size)
+        pad_width = ((0, 0), pad_size, pad_size, pad_size) if feature.ndim == 4 else ((0, 0), pad_size, pad_size)
+        padded_feature = np.pad(feature, pad_width)
+        start_x, start_y = end_loc[:2]
+        end_x, end_y = end_loc[:2] + 2 * self.patch_size + 1
+        if feature.ndim == 4:
+            start_z = end_loc[2]
+            end_z = end_loc[2] + 2 * self.patch_size + 1
+            patch_feature = padded_feature[:, start_x:end_x, start_y:end_y, start_z:end_z]
+        else:
+            patch_feature = padded_feature[:, start_x:end_x, start_y:end_y]
+        return patch_feature
+
+    def extract_line_ends(self, flux, mask):
+        """
+        extract the locations of line ends
+        :param flux: image flux shape of [H, W], [H, W, D]
+        :param mask: mask of image as shape of [H, W], [H, W, D]
+        :return: end_loc, locations of line end-points
+        """
+        flux = np.multiply(flux, mask)
+        flux = gaussian(flux, sigma=0.8)
+        flux = binary_closing(flux > self.threshold)
+        flux = binary_erosion(remove_small_objects(flux, min_size=self.min_size))
+        skel = skeletonize(binary_dilation(flux)) > 0.5
+
+        # line end detection filter
+        def detect_ends(window):
+            if window.ndim == 4:
+                return window[13] == 1 and np.sum(window) == 2
+            else:
+                return window[4] == 1 and np.sum(window) == 2
+
+        # line end detection
+        detect_size = (3, 3, 3) if skel.ndim == 3 else (3, 3)
+        line_ends = generic_filter(skel, detect_ends, detect_size)
+        end_locs = np.argwhere(line_ends > 0.5)
+        return end_locs
+
+    @staticmethod
+    def flip(img_patch, p=0.5):
+        """
+        randomly flip the image patch along x and y-axis
+        :param img_patch: image patch array, [C, H, W], [C, H, W, D]
+        :param p: probability of applying the flip
+        :return: img_patch, flipped image patch array
+                 gt_patch, flipped ground truth array
+        """
+        # flip the image horizontally with prob p
+        if np.random.uniform() < p:
+            img_patch = np.flip(img_patch, axis=1)
+        # flip the image vertically with prob p
+        if np.random.uniform() < p:
+            img_patch = np.flip(img_patch, axis=2)
+        return img_patch
+
+    @staticmethod
+    def rotate(img_patch, p=0.5):
+        """
+        randomly rotate the image patch among {0, 90, 180, 270} degrees
+        :param img_patch: image patch array [C, H, W], [C, H, W, D]
+        :param p: probability of applying the rotation
+        :return: img_patch, flipped image patch array
+                 gt_patch, flipped ground truth array
+        """
+        axes = [(1, 2), (1, 3), (2, 3)]
+        if np.random.uniform() < p:
+            k = np.random.randint(0, 4)
+            j = np.random.randint(0, 3)
+            img_patch = np.rot90(img_patch, k, axes=axes[j])
+        return img_patch
+
+
+class DriveLineEndDataset(LineEndDataset):
+    def __init__(self, data_dir, train=True, patch_size=15, threshold=0.011, min_size=30, augment=True):
+        super(DriveLineEndDataset, self).__init__(patch_size, threshold, min_size, augment)
+        split = 'train' if train else 'valid'
+        data_dir = os.path.join(data_dir, 'LCN_{}'.format(split))
+        mask_files = sorted(os.listdir(os.path.join(data_dir, 'mask')))
+        flux_files = sorted(os.listdir(os.path.join(data_dir, 'flux')))
+        dirs_files = sorted(os.listdir(os.path.join(data_dir, 'dirs')))
+        rads_files = sorted(os.listdir(os.path.join(data_dir, 'rads')))
+        for i in tqdm(range(len(flux_files)), ncols=80, ascii=True, desc='Loading Data: '):
+            mask = np.array(Image.open(os.path.join(data_dir, 'mask', mask_files[i])).convert('L'))
+            mask = binary_erosion(mask, footprint=np.ones((7, 7)))
+            flux = np.load(os.path.join(data_dir, 'flux', flux_files[i]))
+            dirs = np.load(os.path.join(data_dir, 'dirs', dirs_files[i]))
+            rads = np.load(os.path.join(data_dir, 'rads', rads_files[i]))
+            end_locs = self.extract_line_ends(flux, mask)
+            for j in range(end_locs.shape[0]):
+                self.line_end_locs.append((i, end_locs[j]))
+            curr_subject = {
+                'subject_name': flux_files[i].split('.')[0],
+                'flux': np.expand_dims(flux, axis=0),
+                'dirs': dirs,
+                'rads': rads,
+                'end_locs': end_locs
+            }
+            self.subjects.append(curr_subject)
+            if i > 2:
+                break
+
+
+class LSALineEndDataset(LineEndDataset):
+    def __init__(self, data_dir, train=True, patch_size=10, threshold=0.011, min_size=50, augment=True):
+        super(LSALineEndDataset, self).__init__(patch_size, threshold, min_size, augment)
+        split = 'train' if train else 'valid'
+        data_dir = os.path.join(data_dir, 'LCN_{}'.format(split))
+        mask_files = sorted(os.listdir(os.path.join(data_dir, 'mask')))
+        flux_files = sorted(os.listdir(os.path.join(data_dir, 'flux')))
+        dirs_files = sorted(os.listdir(os.path.join(data_dir, 'dirs')))
+        rads_files = sorted(os.listdir(os.path.join(data_dir, 'rads')))
+        for i in tqdm(range(len(flux_files)), ncols=80, ascii=True, desc='Loading Data: '):
+            mask = SiTk.GetArrayFromImage(SiTk.ReadImage(os.path.join(data_dir, 'mask', mask_files[i])))
+            flux = SiTk.GetArrayFromImage(SiTk.ReadImage(os.path.join(data_dir, 'flux', flux_files[i])))
+            dirs = np.load(os.path.join(data_dir, 'dirs', dirs_files[i]))
+            rads = np.load(os.path.join(data_dir, 'rads', rads_files[i]))
+            end_locs = self.extract_line_ends(flux, mask)
+            for j in range(end_locs.shape[0]):
+                self.line_end_locs.append((i, end_locs[j]))
+            curr_subject = {
+                'subject_name': flux_files[i].split('.')[0],
+                'flux': np.expand_dims(flux, axis=0),
+                'dirs': dirs,
+                'rads': rads,
+                'end_locs': end_locs
+            }
+
+
 if __name__ == '__main__':
-    # define the datasets for unit test
-    drive_path = '/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/VesselLearning/Datasets/DRIVE'
-    drive_train = DriveDataset(drive_path, train=True, augment=True)
-    drive_valid = DriveDataset(drive_path, train=False, augment=False)
-    print('DRIVE: Train set size: {}; Test set size: {} '.format(len(drive_train), len(drive_valid)))
-    print('DRIVE Patch Size is {}'.format(drive_train[0]['image'].shape))
-
-    stare_path = '/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/VesselLearning/Datasets/STARE'
-    stare_train = StareDataset(stare_path, train=True, augment=True)
-    stare_valid = StareDataset(stare_path, train=False, augment=False)
-    print('STARE: Train set size: {}; Test set size: {} '.format(len(stare_train), len(stare_valid)))
-    print('STARE Patch Size is {}'.format(stare_train[0]['image'].shape))
-
-    hrf_path = '/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/VesselLearning/Datasets/HRF'
-    hrf_train = HRFDataset(hrf_path, train=True, patch_sizes=[256, 256], spacings=[192, 192], augment=True)
-    hrf_valid = HRFDataset(hrf_path, train=False, patch_sizes=[256, 256], spacings=[192, 192], augment=False)
-    print('HRF: Train set size: {}; Test set size: {} '.format(len(hrf_train), len(hrf_valid)))
-    print('HRF Patch Size is {}'.format(hrf_train[0]['image'].shape))
-
-    tubetk_path = '/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/VesselLearning/Datasets/TubeTK'
-    tubetk_train = TubeTKDataset(tubetk_path, train=True)
-    tubetk_valid = TubeTKDataset(tubetk_path, train=False)
-    print('TubeTK: Train set size: {}; Test set size: {} '.format(len(tubetk_train), len(tubetk_valid)))
-    print('TubeTK Patch Size is {}'.format(tubetk_train[0]['image'].shape))
-
-    vessel12_path = '/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/VesselLearning/Datasets/vessel12'
-    vessel12_train = Vessel12Dataset(vessel12_path, train=True)
-    vessel12_valid = Vessel12Dataset(vessel12_path, train=False)
-    print('VESSEL12: Train set size: {}; Test set size: {} '.format(len(vessel12_train), len(vessel12_valid)))
-    print('VESSEL12 Patch Size is {}'.format(vessel12_train[0]['image'].shape))
-
-    seven_t_path = '/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/VesselLearning/Datasets/7T_Lirong/organized'
-    tof_7t_train = SevenTDataset(seven_t_path, train=True)
-    tof_7t_valid = SevenTDataset(seven_t_path, train=False)
-    print('7T: Train set size: {}; Test set size: {} '.format(len(tof_7t_train), len(tof_7t_valid)))
-    print('7T Patch Size is {}'.format(tof_7t_train[0]['image'].shape))
-
-    lsa_path = '/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/VesselLearning/Datasets/DarkVessels/UnilateralData'
-    lsa_train = LSADataset(lsa_path, train=True)
-    lsa_valid = LSADataset(lsa_path, train=False)
-    print('LSA: Train set size: {}; Test set size: {} '.format(len(lsa_train), len(lsa_valid)))
-    print('LSA Patch Size is {}'.format(lsa_train[0]['image'].shape))
+    # # define the datasets for unit test
+    # drive_path = '/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/VesselLearning/Datasets/DRIVE'
+    # drive_train = DriveDataset(drive_path, train=True, augment=True)
+    # drive_valid = DriveDataset(drive_path, train=False, augment=False)
+    # print('DRIVE: Train set size: {}; Test set size: {} '.format(len(drive_train), len(drive_valid)))
+    # print('DRIVE Patch Size is {}'.format(drive_train[0]['image'].shape))
+    #
+    # stare_path = '/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/VesselLearning/Datasets/STARE'
+    # stare_train = StareDataset(stare_path, train=True, augment=True)
+    # stare_valid = StareDataset(stare_path, train=False, augment=False)
+    # print('STARE: Train set size: {}; Test set size: {} '.format(len(stare_train), len(stare_valid)))
+    # print('STARE Patch Size is {}'.format(stare_train[0]['image'].shape))
+    #
+    # hrf_path = '/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/VesselLearning/Datasets/HRF'
+    # hrf_train = HRFDataset(hrf_path, train=True, patch_sizes=[256, 256], spacings=[192, 192], augment=True)
+    # hrf_valid = HRFDataset(hrf_path, train=False, patch_sizes=[256, 256], spacings=[192, 192], augment=False)
+    # print('HRF: Train set size: {}; Test set size: {} '.format(len(hrf_train), len(hrf_valid)))
+    # print('HRF Patch Size is {}'.format(hrf_train[0]['image'].shape))
+    #
+    # tubetk_path = '/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/VesselLearning/Datasets/TubeTK'
+    # tubetk_train = TubeTKDataset(tubetk_path, train=True)
+    # tubetk_valid = TubeTKDataset(tubetk_path, train=False)
+    # print('TubeTK: Train set size: {}; Test set size: {} '.format(len(tubetk_train), len(tubetk_valid)))
+    # print('TubeTK Patch Size is {}'.format(tubetk_train[0]['image'].shape))
+    #
+    # vessel12_path = '/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/VesselLearning/Datasets/vessel12'
+    # vessel12_train = Vessel12Dataset(vessel12_path, train=True)
+    # vessel12_valid = Vessel12Dataset(vessel12_path, train=False)
+    # print('VESSEL12: Train set size: {}; Test set size: {} '.format(len(vessel12_train), len(vessel12_valid)))
+    # print('VESSEL12 Patch Size is {}'.format(vessel12_train[0]['image'].shape))
+    #
+    # seven_t_path = '/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/VesselLearning/Datasets/7T_Lirong/organized'
+    # tof_7t_train = SevenTDataset(seven_t_path, train=True)
+    # tof_7t_valid = SevenTDataset(seven_t_path, train=False)
+    # print('7T: Train set size: {}; Test set size: {} '.format(len(tof_7t_train), len(tof_7t_valid)))
+    # print('7T Patch Size is {}'.format(tof_7t_train[0]['image'].shape))
+    #
+    # lsa_path = '/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/VesselLearning/Datasets/DarkVessels/UnilateralData'
+    # lsa_train = LSADataset(lsa_path, train=True)
+    # lsa_valid = LSADataset(lsa_path, train=False)
+    # print('LSA: Train set size: {}; Test set size: {} '.format(len(lsa_train), len(lsa_valid)))
+    # print('LSA Patch Size is {}'.format(lsa_train[0]['image'].shape))
+    #
+    drive_le_path = '/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/ConnectVessel/tests/DRIVE'
+    drive_le_train = DriveLineEndDataset(drive_le_path, train=True, augment=False)
+    drive_le_valid = DriveLineEndDataset(drive_le_path, train=False, augment=False)
+    print('DRIVE LINE END: Train set size: {}; Test set size: {} '.format(len(drive_le_train), len(drive_le_valid)))
+    print('DRIVE LINE END Patch Size is {}'.format(drive_le_train[0]['end_loc'].shape))
+    print('DRIVE LINE END Patch Size is {}'.format(drive_le_train[0]['flux'].shape))
+    print('DRIVE LINE END Patch Size is {}'.format(drive_le_train[0]['dirs'].shape))
+    print('DRIVE LINE END Patch Size is {}'.format(drive_le_train[0]['rads'].shape))
+    #
+    # lsa_le_path = '/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/ConnectVessel/tests/LSA'
+    # lsa_le_train = LSALineEndDataset(lsa_le_path, train=True, augment=False)
+    # lsa_le_valid = LSALineEndDataset(lsa_le_path, train=False, augment=False)
+    # print('LSA LINE END: Train set size: {}; Test set size: {} '.format(len(lsa_le_train), len(lsa_le_valid)))
+    # print('LSA LINE END Patch Size is {}'.format(lsa_le_valid[0]['end_loc'].shape))
+    # print('LSA LINE END Patch Size is {}'.format(lsa_le_train[0]['flux'].shape))
+    # print('LSA LINE END Patch Size is {}'.format(lsa_le_train[0]['dirs'].shape))
+    # print('LSA LINE END Patch Size is {}'.format(lsa_le_train[0]['rads'].shape))
