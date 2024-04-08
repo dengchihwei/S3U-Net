@@ -17,12 +17,12 @@ from train import read_json, Trainer
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--data', type=str, default='DRIVE')
-parser.add_argument('--split', type=str, default='valid')
+parser.add_argument('--split', type=str, default='train')
 parser.add_argument('--method', type=str, default='LCN')
 parser.add_argument('--device', type=str, default='cuda:0')
 parser.add_argument('--config_file', type=str, default='./configs/drive/adaptive_lc.json')
 parser.add_argument('--model_path', type=str,
-                    default='../trained_models/DRIVE/DRIVE_ADAPTIVE_LC/2024-03-25-01/ADAPTIVE_LC-1000-epoch.pth')
+                    default='../trained_models/DRIVE/DRIVE_ADAPTIVE_LC/2024-03-25-01/ADAPTIVE_LC-400-epoch.pth')
 
 
 def model_output(args):

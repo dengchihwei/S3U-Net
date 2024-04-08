@@ -15,7 +15,7 @@ from tqdm import tqdm
 from torch.utils.data import Dataset
 from scipy.ndimage import generic_filter
 from skimage.filters import gaussian
-from skimage.morphology import binary_erosion, binary_dilation, binary_closing, remove_small_objects, skeletonize
+from skimage.morphology import binary_erosion,  binary_closing, remove_small_objects, skeletonize, skeletonize_3d
 
 
 class VesselDataset(Dataset):
@@ -492,12 +492,15 @@ class LineEndDataset(Dataset):
         flux = np.multiply(flux, mask)
         flux = gaussian(flux, sigma=0.8)
         flux = binary_closing(flux > self.threshold)
-        flux = binary_erosion(remove_small_objects(flux, min_size=self.min_size))
-        skel = skeletonize(binary_dilation(flux)) > 0.5
+        flux = remove_small_objects(flux, min_size=self.min_size)
+        if flux.ndim == 3:
+            skel = skeletonize_3d(flux) > 0.5
+        else:
+            skel = skeletonize(flux) > 0.5
 
         # line end detection filter
         def detect_ends(window):
-            if window.ndim == 4:
+            if len(window) == 27:
                 return window[13] == 1 and np.sum(window) == 2
             else:
                 return window[4] == 1 and np.sum(window) == 2
@@ -506,7 +509,22 @@ class LineEndDataset(Dataset):
         detect_size = (3, 3, 3) if skel.ndim == 3 else (3, 3)
         line_ends = generic_filter(skel, detect_ends, detect_size)
         end_locs = np.argwhere(line_ends > 0.5)
+        print(end_locs.shape)
         return end_locs
+
+    def binarize(self, flux, mask):
+        """
+        extract the locations of line ends
+        :param flux: image flux shape of [H, W], [H, W, D]
+        :param mask: mask of image as shape of [H, W], [H, W, D]
+        :return: end_loc, locations of line end-points
+        """
+        flux = np.multiply(flux, mask)
+        flux = gaussian(flux, sigma=0.8)
+        flux = binary_closing(flux > self.threshold)
+        flux = binary_erosion(remove_small_objects(flux, min_size=self.min_size))
+        # skel = skeletonize(flux) > 0.5
+        return flux
 
     @staticmethod
     def flip(img_patch, p=0.5):
@@ -543,7 +561,7 @@ class LineEndDataset(Dataset):
 
 
 class DriveLineEndDataset(LineEndDataset):
-    def __init__(self, data_dir, train=True, patch_size=15, threshold=0.011, min_size=30, augment=True):
+    def __init__(self, data_dir, train=True, patch_size=15, threshold=0.012, min_size=30, augment=False):
         super(DriveLineEndDataset, self).__init__(patch_size, threshold, min_size, augment)
         split = 'train' if train else 'valid'
         data_dir = os.path.join(data_dir, 'LCN_{}'.format(split))
@@ -563,17 +581,18 @@ class DriveLineEndDataset(LineEndDataset):
             curr_subject = {
                 'subject_name': flux_files[i].split('.')[0],
                 'flux': np.expand_dims(flux, axis=0),
+                'mask': np.expand_dims(mask, axis=0),
                 'dirs': dirs,
                 'rads': rads,
                 'end_locs': end_locs
             }
             self.subjects.append(curr_subject)
-            if i > 2:
+            if i > -1:
                 break
 
 
 class LSALineEndDataset(LineEndDataset):
-    def __init__(self, data_dir, train=True, patch_size=10, threshold=0.011, min_size=50, augment=True):
+    def __init__(self, data_dir, train=True, patch_size=20, threshold=0.06, min_size=30, augment=False):
         super(LSALineEndDataset, self).__init__(patch_size, threshold, min_size, augment)
         split = 'train' if train else 'valid'
         data_dir = os.path.join(data_dir, 'LCN_{}'.format(split))
@@ -594,8 +613,12 @@ class LSALineEndDataset(LineEndDataset):
                 'flux': np.expand_dims(flux, axis=0),
                 'dirs': dirs,
                 'rads': rads,
-                'end_locs': end_locs
+                'end_locs': end_locs,
+                'meta_data': SiTk.ReadImage(os.path.join(data_dir, 'mask', mask_files[i]))
             }
+            self.subjects.append(curr_subject)
+            if i > 2:
+                break
 
 
 if __name__ == '__main__':

@@ -8,6 +8,7 @@
 import os
 import argparse
 import numpy as np
+import SimpleITK as sitk
 
 from tqdm import tqdm
 from PTF import sample_curve
@@ -15,10 +16,10 @@ from torch.utils.data import DataLoader
 from dataset import DriveLineEndDataset, LSALineEndDataset
 
 parser = argparse.ArgumentParser()
-parser.add_argument('-d', '--data', type=str, default='DRIVE')
-parser.add_argument('-g', '--device', type=str, default='cuda:0')
+parser.add_argument('-d', '--data', type=str, default='LSA')
+parser.add_argument('-g', '--device', type=str, default='cuda:1')
 parser.add_argument('-s', '--split', type=str, default='train')
-parser.add_argument('-b', '--batch_size', type=int, default=512)
+parser.add_argument('-b', '--batch_size', type=int, default=16)
 
 
 drive_le_path = '/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/ConnectVessel/tests/DRIVE'
@@ -36,33 +37,41 @@ def postprocess(args, params):
     data_loader = DataLoader(_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
     image_fluxes = [s['flux'].copy() for s in _dataset.subjects]
     subject_names = [s['subject_name'] for s in _dataset.subjects]
+    meta_datas = [s['meta_data'] for s in _dataset.subjects]
 
     # loop over the dataset to post-process all the images
     for batch in tqdm(data_loader, ncols=80, ascii=True, desc='Post-process: '):
-        flux = batch['flux'].to(args.device)
-        rads = batch['rads'].to(args.device)
-        optimal_res = sample_curve(flux, rads, **params)
+        flux = batch['flux']    # .to(args.device)
+        rads = batch['rads']    # .to(args.device)
+        optimal_res = sample_curve(flux, rads, dir_num=32, **params)
         for i in range(flux.shape[0]):
             curr_flux = flux[i][0].detach().cpu().numpy()                               # [H, W], [H, W, D]
-            curr_loc = batch['end_loc'][i][0].int().detach().cpu().numpy()                    # [2,], [3,]
+            curr_loc = batch['end_loc'][i][0].int().detach().cpu().numpy()              # [2,], [3,]
             curr_idx = batch['image_id'][i].detach().cpu().numpy()
-            curr_path = optimal_res['path'][i].int().detach().cpu().numpy()             # [prob_num, 2/3]
+            curr_path = optimal_res['path'][i].int().detach().cpu().numpy()             # [2, prob_num, 2/3]
             # filter the invalid positions
             patch_size = curr_flux.shape[0]
             curr_path = np.maximum(curr_path, 0)
             curr_path = np.minimum(curr_path, patch_size-1)
             if curr_flux.ndim == 3:
-                curr_flux[curr_path[:, 0], curr_path[:, 1], curr_path[:, 2]] = 1.0
+                curr_flux[curr_path[0, :, 0], curr_path[0, :, 1], curr_path[0, :, 2]] = 1.0
+                curr_flux[curr_path[1, :, 0], curr_path[1, :, 1], curr_path[1, :, 2]] = 1.0
             else:
-                curr_flux[curr_path[:, 0], curr_path[:, 1]] = 1.0
+                curr_flux[curr_path[0, :, 0], curr_path[0, :, 1]] = 1.0
+                curr_flux[curr_path[1, :, 0], curr_path[1, :, 1]] = 1.0
             # update the flux image in the dataset
             image_fluxes[curr_idx] = paste_patch(image_fluxes[curr_idx], curr_flux, curr_loc)
 
     # save the flux as image
     os.makedirs("../tests/{}/fixed_{}".format(args.data, args.split), exist_ok=True)
     for i in range(len(image_fluxes)):
-        flux_path = '../tests/{}/fixed_{}/fixed_{}.npy'.format(args.data, args.split, subject_names[i])
-        np.save(flux_path, image_fluxes[i])
+        # flux_path = '../tests/{}/fixed_{}/fixed_{}.npy'.format(args.data, args.split, subject_names[i])
+        # np.save(flux_path, image_fluxes[i])
+        flux_path = '../tests/{}/fixed_{}/fixed_{}.nii.gz'.format(args.data, args.split, subject_names[i])
+        meta_data = meta_datas[i]
+        flux_image = sitk.GetImageFromArray(image_fluxes[i][0])
+        flux_image.CopyInformation(meta_data)
+        sitk.WriteImage(flux_image, flux_path)
 
 
 def paste_patch(flux, patch, end_loc):
@@ -89,7 +98,7 @@ if __name__ == '__main__':
     arguments = parser.parse_args()
     _params = {
         'sample_num': 32,
-        'prob_num': 60,
+        'prob_num': 25,
         'cs_pt_num': 5,
         'step_len': 0.5
     }
