@@ -22,7 +22,7 @@ parser.add_argument('--method', type=str, default='LCN')
 parser.add_argument('--device', type=str, default='cuda:0')
 parser.add_argument('--config_file', type=str, default='./configs/drive/adaptive_lc.json')
 parser.add_argument('--model_path', type=str,
-                    default='../trained_models/DRIVE/DRIVE_ADAPTIVE_LC/2024-03-25-01/ADAPTIVE_LC-400-epoch.pth')
+                    default='../trained_models/DRIVE/DRIVE_ADAPTIVE_LC/2024-04-18-03/ADAPTIVE_LC-300-epoch.pth')
 
 
 def model_output(args):

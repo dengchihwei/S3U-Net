@@ -6,15 +6,17 @@
 
 
 import os
+import sknw
 import torch
 import numpy as np
 import SimpleITK as SiTk
 import monai.transforms as tf
+
 from PIL import Image
 from tqdm import tqdm
+from ietk import methods
 from torch.utils.data import Dataset
-from scipy.ndimage import generic_filter
-from skimage.filters import gaussian
+from scipy.ndimage import gaussian_filter
 from skimage.morphology import binary_erosion,  binary_closing, remove_small_objects, skeletonize, skeletonize_3d
 
 
@@ -134,7 +136,12 @@ class VesselDataset(Dataset):
                 image = image.resize(image_sizes)
                 label = label.resize(image_sizes)
                 mask = mask.resize(image_sizes)
-            image = np.asarray(image)[..., 1]           # green channel
+            # pre-process to adjust the contrast
+            image = np.array(image) * 1.0 / 255.0
+            image = np.clip(methods.brighten_darken(image, 'A+B+C+X'), a_min=0.0, a_max=None)
+            image = np.clip(methods.sharpen(image), a_min=0.0, a_max=None)
+            # select the green channel
+            image = image[..., 1]                                   # green channel
             label = np.asarray(label)
             mask = np.asarray(mask)
             # normalization of image
@@ -422,12 +429,13 @@ class LSADataset(VesselDataset):
 
 
 class LineEndDataset(Dataset):
-    def __init__(self, patch_size, threshold, min_size, augment=False):
+    def __init__(self, patch_size, threshold, min_size, min_len=5, augment=False):
         """
         abstract class for line end connection
         :param patch_size: size of patches to crop the features
         :param threshold: threshold to binarize the flux response
         :param min_size: minimum size of connected components to remove
+        :param min_size: the minimum length of each branch, int
         :param augment: augmentation only for 2D datasets
         """
         self.subjects = []
@@ -435,30 +443,35 @@ class LineEndDataset(Dataset):
         self.patch_size = patch_size
         self.threshold = threshold
         self.min_size = min_size
+        self.min_len = min_len
         self.augment = augment
 
     def __len__(self):
         return len(self.line_end_locs)
 
     def __getitem__(self, index):
+        image_idx, end_index = self.line_end_locs[index]
+        end_loc = self.subjects[image_idx]['ends_locs'][end_index]
+
         # crop the image features
-        image_idx, end_loc = self.line_end_locs[index]
         flux_patch = self.crop_feature(self.subjects[image_idx]['flux'], end_loc)
-        dirs_patch = self.crop_feature(self.subjects[image_idx]['dirs'], end_loc)
         rads_patch = self.crop_feature(self.subjects[image_idx]['rads'], end_loc)
+        dirs_patch = self.crop_feature(self.subjects[image_idx]['dirs'], end_loc)
+
         if 'mask' in self.subjects[image_idx].keys():
             mask_patch = self.crop_feature(self.subjects[image_idx]['mask'] > 0.5, end_loc)
             flux_patch = np.multiply(flux_patch, mask_patch)
         if self.augment and len(flux_patch.shape) == 2:
             flux_patch = self.flip(flux_patch)
             flux_patch = self.rotate(flux_patch)
+
         # convert to torch types
         item = {
             'image_id': image_idx,
-            'end_loc': torch.from_numpy(end_loc.copy()).unsqueeze(0).float(),
-            'flux': torch.from_numpy(flux_patch.copy()).float(),
-            'dirs': torch.from_numpy(dirs_patch.copy()).float(),
-            'rads': torch.from_numpy(rads_patch.copy()).float()
+            'pred_flux': torch.from_numpy(flux_patch.copy()).float(),
+            'pred_rads': torch.from_numpy(rads_patch.copy()).float(),
+            'pred_dirs': torch.from_numpy(dirs_patch.copy()).float(),
+            'end_loc': torch.from_numpy(end_loc.copy()).unsqueeze(0).float()
         }
         return item
 
@@ -466,7 +479,7 @@ class LineEndDataset(Dataset):
         """
         crop the features centered as the line end locations
         :param feature: image features shape of [C, H, W], [C, H, W, D]
-        :param end_loc: locations of line end
+        :param end_loc: location of line end
         :return: cropped the features [C, PS, PS], [C, PS, PS, PS]
         """
         pad_size = (self.patch_size, self.patch_size)
@@ -482,49 +495,54 @@ class LineEndDataset(Dataset):
             patch_feature = padded_feature[:, start_x:end_x, start_y:end_y]
         return patch_feature
 
-    def extract_line_ends(self, flux, mask):
-        """
-        extract the locations of line ends
-        :param flux: image flux shape of [H, W], [H, W, D]
-        :param mask: mask of image as shape of [H, W], [H, W, D]
-        :return: end_loc, locations of line end-points
-        """
-        flux = np.multiply(flux, mask)
-        flux = gaussian(flux, sigma=0.8)
-        flux = binary_closing(flux > self.threshold)
-        flux = remove_small_objects(flux, min_size=self.min_size)
-        if flux.ndim == 3:
-            skel = skeletonize_3d(flux) > 0.5
-        else:
-            skel = skeletonize(flux) > 0.5
-
-        # line end detection filter
-        def detect_ends(window):
-            if len(window) == 27:
-                return window[13] == 1 and np.sum(window) == 2
-            else:
-                return window[4] == 1 and np.sum(window) == 2
-
-        # line end detection
-        detect_size = (3, 3, 3) if skel.ndim == 3 else (3, 3)
-        line_ends = generic_filter(skel, detect_ends, detect_size)
-        end_locs = np.argwhere(line_ends > 0.5)
-        print(end_locs.shape)
-        return end_locs
-
     def binarize(self, flux, mask):
         """
         extract the locations of line ends
         :param flux: image flux shape of [H, W], [H, W, D]
         :param mask: mask of image as shape of [H, W], [H, W, D]
-        :return: end_loc, locations of line end-points
+        :return: binary response [H, W], [H, W, D]
         """
         flux = np.multiply(flux, mask)
-        flux = gaussian(flux, sigma=0.8)
-        flux = binary_closing(flux > self.threshold)
-        flux = binary_erosion(remove_small_objects(flux, min_size=self.min_size))
-        # skel = skeletonize(flux) > 0.5
+        flux = gaussian_filter(flux, sigma=0.5)
+        flux = flux > self.threshold
+        flux = binary_closing(flux)
+        flux = remove_small_objects(flux, min_size=self.min_size)
         return flux
+
+    @staticmethod
+    def extract_skeleton(binary_response):
+        """
+        extract the locations of line ends
+        :param binary_response: threshold-ed flux shape of [H, W], [H, W, D]
+        :return: skeleton of the flux shape of [H, W], [H, W, D]
+        """
+        # skeletonize the image
+        skel_func = skeletonize_3d if binary_response.ndim == 3 else skeletonize
+        skeleton = skel_func(binary_response)
+        return skeleton
+
+    @staticmethod
+    def extract_line_ends(skeleton, min_len=5):
+        """
+        extract the locations of line ends
+        :param skeleton: skeleton of the flux of [H, W], [H, W, D]
+        :param min_len: the minimum length of each branch, int
+        :return: end_loc, locations of line end-points [K, 2], [K, 3]
+        """
+        # convert the skeleton to graph
+        graph = sknw.build_sknw(skeleton, iso=True, ring=True, full=True)
+        # filter the invalid end points
+        valid_nodes_index = []
+        for n_idx in graph.nodes():
+            if len(graph[n_idx]) == 1:
+                e_idx = list(graph[n_idx])[0]
+                if len(graph[n_idx][e_idx]['pts']) > min_len:
+                    valid_nodes_index.append(n_idx)
+        # line end detection
+        nodes = graph.nodes()
+        ends_locs = np.array([nodes[idx]['o'] for idx in valid_nodes_index])
+        ends_locs = ends_locs.astype(np.int32)
+        return ends_locs
 
     @staticmethod
     def flip(img_patch, p=0.5):
@@ -559,10 +577,16 @@ class LineEndDataset(Dataset):
             img_patch = np.rot90(img_patch, k, axes=axes[j])
         return img_patch
 
+    @staticmethod
+    def normalize(image):
+        image = (image - image.min()) / (image.max() - image.min())
+        return image
+
 
 class DriveLineEndDataset(LineEndDataset):
-    def __init__(self, data_dir, train=True, patch_size=15, threshold=0.012, min_size=30, augment=False):
-        super(DriveLineEndDataset, self).__init__(patch_size, threshold, min_size, augment)
+    def __init__(self, data_dir, train=True, patch_size=15, threshold=0.25, min_size=30, min_len=5, augment=False):
+        super(DriveLineEndDataset, self).__init__(patch_size=patch_size, threshold=threshold, min_size=min_size,
+                                                  min_len=min_len, augment=augment)
         split = 'train' if train else 'valid'
         data_dir = os.path.join(data_dir, 'LCN_{}'.format(split))
         mask_files = sorted(os.listdir(os.path.join(data_dir, 'mask')))
@@ -572,28 +596,32 @@ class DriveLineEndDataset(LineEndDataset):
         for i in tqdm(range(len(flux_files)), ncols=80, ascii=True, desc='Loading Data: '):
             mask = np.array(Image.open(os.path.join(data_dir, 'mask', mask_files[i])).convert('L'))
             mask = binary_erosion(mask, footprint=np.ones((7, 7)))
-            flux = np.load(os.path.join(data_dir, 'flux', flux_files[i]))
+            flux = self.normalize(np.load(os.path.join(data_dir, 'flux', flux_files[i]))) * 10.0
             dirs = np.load(os.path.join(data_dir, 'dirs', dirs_files[i]))
             rads = np.load(os.path.join(data_dir, 'rads', rads_files[i]))
-            end_locs = self.extract_line_ends(flux, mask)
-            for j in range(end_locs.shape[0]):
-                self.line_end_locs.append((i, end_locs[j]))
+            # start post-process
+            binary_response = self.binarize(flux, mask)                         # thresholding
+            skeleton = self.extract_skeleton(binary_response)                   # skeletonizing
+            ends_locs = self.extract_line_ends(skeleton)                        # extract line end-points
+            for j in range(ends_locs.shape[0]):
+                self.line_end_locs.append((i, j))
             curr_subject = {
                 'subject_name': flux_files[i].split('.')[0],
                 'flux': np.expand_dims(flux, axis=0),
                 'mask': np.expand_dims(mask, axis=0),
                 'dirs': dirs,
                 'rads': rads,
-                'end_locs': end_locs
+                'skel': skeleton,
+                'bin_res': binary_response,
+                'ends_locs': ends_locs
             }
             self.subjects.append(curr_subject)
-            if i > -1:
-                break
 
 
 class LSALineEndDataset(LineEndDataset):
-    def __init__(self, data_dir, train=True, patch_size=20, threshold=0.06, min_size=30, augment=False):
-        super(LSALineEndDataset, self).__init__(patch_size, threshold, min_size, augment)
+    def __init__(self, data_dir, train=True, patch_size=20, threshold=0.06, min_size=30, min_len=10, augment=False):
+        super(LSALineEndDataset, self).__init__(patch_size=patch_size, threshold=threshold, min_size=min_size,
+                                                min_len=min_len, augment=augment)
         split = 'train' if train else 'valid'
         data_dir = os.path.join(data_dir, 'LCN_{}'.format(split))
         mask_files = sorted(os.listdir(os.path.join(data_dir, 'mask')))
@@ -605,16 +633,21 @@ class LSALineEndDataset(LineEndDataset):
             flux = SiTk.GetArrayFromImage(SiTk.ReadImage(os.path.join(data_dir, 'flux', flux_files[i])))
             dirs = np.load(os.path.join(data_dir, 'dirs', dirs_files[i]))
             rads = np.load(os.path.join(data_dir, 'rads', rads_files[i]))
-            end_locs = self.extract_line_ends(flux, mask)
-            for j in range(end_locs.shape[0]):
-                self.line_end_locs.append((i, end_locs[j]))
+            # start post-process
+            binary_response = self.binarize(flux, mask)                     # thresholding
+            skeleton = self.extract_skeleton(binary_response)               # skeletonizing
+            ends_locs = self.extract_line_ends(skeleton)                    # extract line end-points
+            for j in range(ends_locs.shape[0]):
+                self.line_end_locs.append((i, j))
             curr_subject = {
                 'subject_name': flux_files[i].split('.')[0],
+                'meta_data': SiTk.ReadImage(os.path.join(data_dir, 'mask', mask_files[i])),
                 'flux': np.expand_dims(flux, axis=0),
+                'mask': np.expand_dims(mask, axis=0),
                 'dirs': dirs,
                 'rads': rads,
-                'end_locs': end_locs,
-                'meta_data': SiTk.ReadImage(os.path.join(data_dir, 'mask', mask_files[i]))
+                'skel': skeleton,
+                'ends_locs': ends_locs
             }
             self.subjects.append(curr_subject)
             if i > 2:
@@ -670,9 +703,9 @@ if __name__ == '__main__':
     drive_le_valid = DriveLineEndDataset(drive_le_path, train=False, augment=False)
     print('DRIVE LINE END: Train set size: {}; Test set size: {} '.format(len(drive_le_train), len(drive_le_valid)))
     print('DRIVE LINE END Patch Size is {}'.format(drive_le_train[0]['end_loc'].shape))
-    print('DRIVE LINE END Patch Size is {}'.format(drive_le_train[0]['flux'].shape))
-    print('DRIVE LINE END Patch Size is {}'.format(drive_le_train[0]['dirs'].shape))
-    print('DRIVE LINE END Patch Size is {}'.format(drive_le_train[0]['rads'].shape))
+    print('DRIVE LINE END Patch Size is {}'.format(drive_le_train[0]['pred_flux'].shape))
+    print('DRIVE LINE END Patch Size is {}'.format(drive_le_train[0]['pred_dirs'].shape))
+    print('DRIVE LINE END Patch Size is {}'.format(drive_le_train[0]['pred_rads'].shape))
     #
     # lsa_le_path = '/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/ConnectVessel/tests/LSA'
     # lsa_le_train = LSALineEndDataset(lsa_le_path, train=True, augment=False)

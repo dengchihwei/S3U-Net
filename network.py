@@ -90,7 +90,7 @@ class SpatialAttention2d(nn.Module):
         self.sample_num = sample_num
         self.sample_layer = sample_layers
         self.radius_conv = SingleConv2d(out_ch, sample_num, size, pad, act=nn.Sigmoid())
-        self.attention_conv = SingleConv2d(4, 1, size, pad, act=nn.Sigmoid())
+        self.attention_conv = SingleConv2d(4, 1, size, pad, act=nn.Tanh())
 
     def forward(self, image, x, radius=None):
         if radius is None:

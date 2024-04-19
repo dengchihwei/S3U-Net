@@ -6,6 +6,7 @@
 
 
 import os
+import torch
 import argparse
 import numpy as np
 import SimpleITK as sitk
@@ -16,10 +17,10 @@ from torch.utils.data import DataLoader
 from dataset import DriveLineEndDataset, LSALineEndDataset
 
 parser = argparse.ArgumentParser()
-parser.add_argument('-d', '--data', type=str, default='LSA')
+parser.add_argument('-d', '--data', type=str, default='DRIVE')
 parser.add_argument('-g', '--device', type=str, default='cuda:1')
 parser.add_argument('-s', '--split', type=str, default='train')
-parser.add_argument('-b', '--batch_size', type=int, default=16)
+parser.add_argument('-b', '--batch_size', type=int, default=1024)
 
 
 drive_le_path = '/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/ConnectVessel/tests/DRIVE'
@@ -29,62 +30,83 @@ lsa_le_path = '/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/ConnectVessel/tests
 def postprocess(args, params):
     # get the dataset as indicated
     if args.data == 'DRIVE':
-        _dataset = DriveLineEndDataset(drive_le_path, train=args.split == 'train', augment=False)
+        _dataset = DriveLineEndDataset(drive_le_path, train=args.split == 'train', threshold=0.35, augment=False)
     elif args.data == 'LSA':
-        _dataset = LSALineEndDataset(lsa_le_path, train=args.split == 'train', augment=False)
+        _dataset = LSALineEndDataset(lsa_le_path, train=args.split == 'train', threshold=0.017, augment=False)
     else:
         raise ValueError('No such dataset type... ')
     data_loader = DataLoader(_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
-    image_fluxes = [s['flux'].copy() for s in _dataset.subjects]
-    subject_names = [s['subject_name'] for s in _dataset.subjects]
-    meta_datas = [s['meta_data'] for s in _dataset.subjects]
+
+    # copy the flux outside the dataset
+    image_fluxes, subject_names = [], []
+    for s in _dataset.subjects:
+        image_fluxes.append(s['flux'].copy())
+        subject_names.append(s['subject_name'])
 
     # loop over the dataset to post-process all the images
     for batch in tqdm(data_loader, ncols=80, ascii=True, desc='Post-process: '):
-        flux = batch['flux']    # .to(args.device)
-        rads = batch['rads']    # .to(args.device)
-        optimal_res = sample_curve(flux, rads, dir_num=32, **params)
+        flux = batch['pred_flux'].to(args.device)
+        rads = batch['pred_rads'].to(args.device)
+        optimal_res = sample_curve(flux, rads, **params)
+        batch_indices = torch.arange(flux.shape[0])
+        # find the best match direction
+        _, indices = torch.max(optimal_res['prior'], dim=1)
+        # get the opposite direction
+        indices = indices - params['dir_num'] // 2
+        indices = indices + (indices < 0) * params['dir_num']
+        # extract the optimal path
+        optimal_path = optimal_res['path'][batch_indices, indices]
+        optimal_prior = optimal_res['prior'][batch_indices, indices]
+        # test
         for i in range(flux.shape[0]):
-            curr_flux = flux[i][0].detach().cpu().numpy()                               # [H, W], [H, W, D]
-            curr_loc = batch['end_loc'][i][0].int().detach().cpu().numpy()              # [2,], [3,]
+            if optimal_prior[i] < 0.2:
+                continue
+            curr_flux = flux[i][0].detach().cpu().numpy()               # [H, W], [H, W, D]
             curr_idx = batch['image_id'][i].detach().cpu().numpy()
-            curr_path = optimal_res['path'][i].int().detach().cpu().numpy()             # [2, prob_num, 2/3]
+            curr_loc = batch['end_loc'][i][0].round().int().detach().cpu().numpy()      # [2,], [3,]
+            curr_path = optimal_path[i].round().int().detach().cpu().numpy()            # [prob_num, 2/3]
             # filter the invalid positions
             patch_size = curr_flux.shape[0]
             curr_path = np.maximum(curr_path, 0)
             curr_path = np.minimum(curr_path, patch_size-1)
             if curr_flux.ndim == 3:
-                curr_flux[curr_path[0, :, 0], curr_path[0, :, 1], curr_path[0, :, 2]] = 1.0
-                curr_flux[curr_path[1, :, 0], curr_path[1, :, 1], curr_path[1, :, 2]] = 1.0
+                curr_flux[curr_path[:, 0], curr_path[:, 1], curr_path[:, 2]] = 20.0
             else:
-                curr_flux[curr_path[0, :, 0], curr_path[0, :, 1]] = 1.0
-                curr_flux[curr_path[1, :, 0], curr_path[1, :, 1]] = 1.0
+                curr_flux[curr_path[:, 0], curr_path[:, 1]] = 20.0
             # update the flux image in the dataset
             image_fluxes[curr_idx] = paste_patch(image_fluxes[curr_idx], curr_flux, curr_loc)
+
+    # for i in range(len(image_fluxes)):
+    #     curr_ends_locs = _dataset.subjects[i]['ends_locs']
+    #     for j in range(curr_ends_locs.shape[0]):
+    #         image_fluxes[i][:, curr_ends_locs[j, 0], curr_ends_locs[j, 1]] = 30.0
 
     # save the flux as image
     os.makedirs("../tests/{}/fixed_{}".format(args.data, args.split), exist_ok=True)
     for i in range(len(image_fluxes)):
-        # flux_path = '../tests/{}/fixed_{}/fixed_{}.npy'.format(args.data, args.split, subject_names[i])
-        # np.save(flux_path, image_fluxes[i])
-        flux_path = '../tests/{}/fixed_{}/fixed_{}.nii.gz'.format(args.data, args.split, subject_names[i])
-        meta_data = meta_datas[i]
-        flux_image = sitk.GetImageFromArray(image_fluxes[i][0])
-        flux_image.CopyInformation(meta_data)
-        sitk.WriteImage(flux_image, flux_path)
+        curr_flux = image_fluxes[i][0]
+        if curr_flux.ndim == 3:
+            flux_path = '../tests/{}/fixed_{}/fixed_{}.nii.gz'.format(args.data, args.split, subject_names[i])
+            meta_data = _dataset.subjects[i]['meta_data']
+            flux_image = sitk.GetImageFromArray(curr_flux)
+            flux_image.CopyInformation(meta_data)
+            sitk.WriteImage(flux_image, flux_path)
+        else:
+            flux_path = '../tests/{}/fixed_{}/fixed_{}.npy'.format(args.data, args.split, subject_names[i])
+            np.save(flux_path, curr_flux)
 
 
-def paste_patch(flux, patch, end_loc):
+def paste_patch(flux, patch, line_end_loc):
     assert patch.shape[0] == patch.shape[1]
     patch_size = patch.shape[0] // 2
     pad_size = (patch_size, patch_size)
     pad_width = ((0, 0), pad_size, pad_size, pad_size) if flux.ndim == 4 else ((0, 0), pad_size, pad_size)
     padded_flux = np.pad(flux, pad_width)
-    start_x, start_y = end_loc[:2]
-    end_x, end_y = end_loc[:2] + 2 * patch_size + 1
+    start_x, start_y = line_end_loc[:2]
+    end_x, end_y = line_end_loc[:2] + 2 * patch_size + 1
     if patch.ndim == 3:
-        start_z = end_loc[2]
-        end_z = end_loc[2] + 2 * patch_size + 1
+        start_z = line_end_loc[2]
+        end_z = line_end_loc[2] + 2 * patch_size + 1
         padded_flux[0, start_x:end_x, start_y:end_y, start_z:end_z] = patch
         new_flux = padded_flux[:, patch_size:-patch_size, patch_size:-patch_size, patch_size:-patch_size]
     else:
@@ -97,9 +119,11 @@ def paste_patch(flux, patch, end_loc):
 if __name__ == '__main__':
     arguments = parser.parse_args()
     _params = {
-        'sample_num': 32,
-        'prob_num': 25,
-        'cs_pt_num': 5,
-        'step_len': 0.5
+        'dir_num': 32,
+        'sample_num': 64,
+        'prob_num': 60,
+        'cs_pt_num': 3,
+        'max_k': 0.06,
+        'step_len': 0.25
     }
     postprocess(arguments, _params)

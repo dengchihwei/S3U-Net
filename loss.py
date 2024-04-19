@@ -247,9 +247,10 @@ def flux_loss(image, output, sample_num):
         res2 = calc_dir_response(sample_dir2, curr_rad2, gradients, basis, grid_base)   # [B, H, W, D, 3]
         # find the min responses of the two dirs
         response += torch.maximum(res1, res2) * 2 / sample_num
-    response = torch.clip(- torch.sum(response[..., 1:], dim=-1), min=0.0)  # clip the response by 0, [B, H, W, D]
+    response = - torch.sum(response[..., 1:], dim=-1)
+    response = torch.clip(response, min=0.0)                                # clip the response by 0, [B, H, W, D]
     if 'attentions' in output.keys():
-        response = torch.mul(response, 1.0 + output['attentions'][-1])
+        response = torch.mul(response, output['attentions'][-1] + 1.0)
     return response
 
 
@@ -405,7 +406,6 @@ def calc_local_contrast(image, estimated_r, sample_num, scale_steps):
             # adding the image local contrasts
             img_contrast_i += torch.mul(sampled_img_pos_i, sampled_img_neg_i) / sample_num / scale_steps
             img_contrast_o += torch.mul(sampled_img_pos_o, sampled_img_neg_o) / sample_num / scale_steps
-        # del sampled_img_pos_i, sampled_img_neg_i, sampled_img_pos_o, sampled_img_neg_o
     # compute the inside / outside ratio
     epsilon = 3e-2 if d else 1e-4
     img_local_contrast = torch.div(img_contrast_o, img_contrast_i + epsilon) - 1.0
@@ -440,7 +440,7 @@ def vessel_loss(image, output, loss_config):
         'rcon_loss': reconstruct_loss.unsqueeze(0)
     }
     # attention loss
-    if 'lambda_attention' in loss_config.keys() and 'attentions' in output.keys():
+    if 'lambda_attention' in loss_config.keys() and loss_config['lambda_attention'] > 0:
         mean_exposure = loss_config['mean_exp']
         mean_att_loss = attention_loss(output, mean_exposure) * loss_config['lambda_attention']
         total_loss += mean_att_loss
