@@ -2,7 +2,7 @@
   "name": "LSA_ADAPTIVE_LC",
   "data": {
     "type": "LSADataset",
-    "batch_size": 6,
+    "batch_size": 9,
     "args": {
       "data_dir": "/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/VesselLearning/Datasets/DarkVessels/UnilateralData",
       "patch_sizes": [48, 48, 48],
@@ -34,7 +34,7 @@
   },
   "trainer": {
     "train_type": "ADAPTIVE_LC",
-    "gpu_device_num": 2,
+    "gpu_device_num": 3,
     "epoch_num": 200,
     "save_period": 1,
     "resume": false,

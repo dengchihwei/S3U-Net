@@ -261,10 +261,8 @@ class Initializer(object):
 
 
 class UNet2D(nn.Module):
-    def __init__(self, in_ch, out_ch, min_scale, max_scale, radius_num, feat_dims,
-                 size=3, pool_size=2, stride=2, pad=1, out_pad=0):
+    def __init__(self, in_ch, out_ch, feat_dims, size=3, pool_size=2, stride=2, pad=1, out_pad=0):
         super(UNet2D, self).__init__()
-        self.min_scale, self.max_scale, self.out_ch = min_scale, max_scale, out_ch
         # encoder part
         self.encoder1 = SingleEncoder2d(in_ch, feat_dims[0], size, pool_size, pad, apply_pool=False)
         self.encoder2 = SingleEncoder2d(feat_dims[0], feat_dims[1], size, pool_size, pad, apply_pool=True)
@@ -275,12 +273,10 @@ class UNet2D(nn.Module):
         self.decoder2 = SingleDecoder2d(feat_dims[2] + feat_dims[1], feat_dims[1], size, stride, pad, out_pad)
         self.decoder3 = SingleDecoder2d(feat_dims[1] + feat_dims[0], feat_dims[0], size, stride, pad, out_pad)
         # final conv
-        self.recon_conv = nn.Conv2d(feat_dims[0], in_ch, 1)
-        self.direction_conv = nn.Conv2d(feat_dims[0], out_ch, 1)
-        self.radius_conv = nn.Conv2d(feat_dims[0], radius_num, 1)
+        self.pred = nn.Conv2d(feat_dims[0], out_ch, 1)
         Initializer.weights_init(self)
 
-    def forward(self, im, loss_config):
+    def forward(self, im, gt):
         x1 = self.encoder1(im)
         x2 = self.encoder2(x1)
         x3 = self.encoder3(x2)
@@ -290,24 +286,19 @@ class UNet2D(nn.Module):
         x = self.decoder2(x2, x)
         x = self.decoder3(x1, x)
 
-        recon = self.recon_conv(x)
-        direction = self.direction_conv(x)
-        radius = torch.sigmoid(self.radius_conv(x)) * self.max_scale + self.min_scale
-        output = {
-            'vessel': direction,
-            'radius': radius,
-            'recon': recon
-        }
+        # prediction
+        pred = self.pred(x)
+
         # calculate the losses
-        losses = vessel_loss(im, output, loss_config)
+        losses = F.binary_cross_entropy_with_logits(pred, gt)
         return losses
 
 
 class LocalContrastNet2D(nn.Module):
-    def __init__(self, in_ch, out_ch, min_scale, max_scale, radius_num,
-                 feat_dims, size=3, pool_size=2, stride=2, pad=1, out_pad=0):
+    def __init__(self, in_ch, out_ch, min_scale, max_scale, radius_num, feat_dims,
+                 spt_attn=True, size=3, pool_size=2, stride=2, pad=1, out_pad=0):
         super(LocalContrastNet2D, self).__init__()
-        self.min_scale, self.max_scale = min_scale, max_scale
+        self.min_scale, self.max_scale, self.spt_attn = min_scale, max_scale, spt_attn
         # encoder part
         self.encoder1 = SingleEncoder2d(in_ch, feat_dims[0], size, pool_size, pad, apply_pool=False)
         self.encoder2 = SingleEncoder2d(feat_dims[0], feat_dims[1], size, pool_size, pad, apply_pool=True)
@@ -318,18 +309,15 @@ class LocalContrastNet2D(nn.Module):
         self.decoder2 = SingleDecoder2d(feat_dims[2] + feat_dims[1], feat_dims[1], size, stride, pad, out_pad)
         self.decoder3 = SingleDecoder2d(feat_dims[1] + feat_dims[0], feat_dims[0], size, stride, pad, out_pad)
         # spatial attention part
-        self.level_attention1 = SpatialAttention2d(feat_dims[0], min_scale, max_scale, size, pad)
-        self.level_attention2 = SpatialAttention2d(feat_dims[1], min_scale, max_scale, size, pad)
-        self.level_attention3 = SpatialAttention2d(feat_dims[2], min_scale, max_scale, size, pad)
-        self.global_attention = SpatialAttention2d(feat_dims[0], min_scale, max_scale, size, pad, radius_num, 5)
+        if self.spt_attn:
+            self.level_attention1 = SpatialAttention2d(feat_dims[0], min_scale, max_scale, size, pad)
+            self.level_attention2 = SpatialAttention2d(feat_dims[1], min_scale, max_scale, size, pad)
+            self.level_attention3 = SpatialAttention2d(feat_dims[2], min_scale, max_scale, size, pad)
+            self.global_attention = SpatialAttention2d(feat_dims[0], min_scale, max_scale, size, pad, radius_num, 5)
         # final conv
         self.recon_conv = nn.Conv2d(feat_dims[0], in_ch, 1)
         self.direction_conv = nn.Conv2d(feat_dims[0], out_ch, 1)
         self.radius_conv = nn.Conv2d(feat_dims[0], radius_num, 1)
-        # self.k1_conv = nn.Conv2d(feat_dims[0], 1, 1)
-        # self.recon_conv = OutConv(feat_dims[0], 128, in_ch, size=1, pad=0)
-        # self.direction_conv = OutConv(feat_dims[0], 128, out_ch, size=1, pad=0)
-        # self.radius_conv = OutConv(feat_dims[0], 128, radius_num, size=1, pad=0)
         Initializer.weights_init(self)
 
     def forward(self, im, loss_config=None):
@@ -340,14 +328,21 @@ class LocalContrastNet2D(nn.Module):
         x4 = self.encoder4(x3)
 
         # apply attention
-        attention1 = self.level_attention1(im, x1)
-        x1 = torch.mul(attention1, x1)
-        x = F.interpolate(im, scale_factor=0.5, mode='bilinear')
-        attention2 = self.level_attention2(x, x2)
-        x2 = torch.mul(attention2, x2)
-        x = F.interpolate(x, scale_factor=0.5, mode='bilinear')
-        attention3 = self.level_attention3(x, x3)
-        x3 = torch.mul(attention3, x3)
+        attentions = []
+        if self.spt_attn:
+            attention1 = self.level_attention1(im, x1)
+            x1 = torch.mul(attention1, x1)
+            attentions.append(attention1)
+
+            x = F.interpolate(im, scale_factor=0.5, mode='bilinear')
+            attention2 = self.level_attention2(x, x2)
+            x2 = torch.mul(attention2, x2)
+            attentions.append(attention2)
+
+            x = F.interpolate(x, scale_factor=0.5, mode='bilinear')
+            attention3 = self.level_attention3(x, x3)
+            x3 = torch.mul(attention3, x3)
+            attentions.append(attention3)
 
         # decoding
         x = self.decoder1(x3, x4)
@@ -358,24 +353,28 @@ class LocalContrastNet2D(nn.Module):
         recon = self.recon_conv(x)
         direction = self.direction_conv(x)
         radius = torch.sigmoid(self.radius_conv(x)) * self.max_scale + self.min_scale
-        attention = self.global_attention(im, x, radius).squeeze(1)
-        attentions = [attention1, attention2, attention3, attention]
+
+        # output dicts
         output = {
             'recon': recon,
             'radius': radius,
-            'vessel': direction,
-            'attentions': attentions,
+            'vessel': direction
         }
+
+        # global attention
+        if self.spt_attn:
+            global_attn = self.global_attention(im, x, radius).squeeze(1)
+            attentions.append(global_attn)
+            output['attentions'] = attentions
+
         # calculate the losses
         losses = vessel_loss(im, output, loss_config) if loss_config is not None else None
         return output, losses
 
 
 class UNet3D(nn.Module):
-    def __init__(self, in_ch=1, out_ch=3, min_scale=0.1, max_scale=10.5, radius_num=128,
-                 feat_dims=None, size=3, pool_size=2, stride=2, pad=1, out_pad=0):
+    def __init__(self, in_ch, out_ch,  feat_dims, size=3, pool_size=2, stride=2, pad=1, out_pad=0):
         super(UNet3D, self).__init__()
-        self.min_scale, self.max_scale, self.out_ch = min_scale, max_scale, out_ch
         # encoder part
         self.encoder1 = SingleEncoder3d(in_ch, feat_dims[0], size, pool_size, pad, apply_pool=False)
         self.encoder2 = SingleEncoder3d(feat_dims[0], feat_dims[1], size, pool_size, pad, apply_pool=True)
@@ -386,12 +385,10 @@ class UNet3D(nn.Module):
         self.decoder2 = SingleDecoder3d(feat_dims[2] + feat_dims[1], feat_dims[1], size, stride, pad, out_pad)
         self.decoder3 = SingleDecoder3d(feat_dims[1] + feat_dims[0], feat_dims[0], size, stride, pad, out_pad)
         # final conv
-        self.recon_conv = nn.Conv3d(feat_dims[0], in_ch, 1)
-        self.direction_conv = nn.Conv3d(feat_dims[0], out_ch, 1)
-        self.radius_conv = nn.Conv3d(feat_dims[0], radius_num, 1)
+        self.pred = nn.Conv3d(feat_dims[0], out_ch, 1)
         Initializer.weights_init(self)
 
-    def forward(self, im, loss_config):
+    def forward(self, im, gt):
         x1 = self.encoder1(im)
         x2 = self.encoder2(x1)
         x3 = self.encoder3(x2)
@@ -401,26 +398,19 @@ class UNet3D(nn.Module):
         x = self.decoder2(x2, x)
         x = self.decoder3(x1, x)
 
-        recon = self.recon_conv(x)
-        direction = self.direction_conv(x)
-        radius = torch.sigmoid(self.radius_conv(x)) * self.max_scale + self.min_scale
-        output = {
-            'vessel': direction,
-            'radius': radius,
-            'recon': recon
-        }
+        # prediction
+        pred = self.pred(x)
+
         # calculate the losses
-        losses = vessel_loss(im, output, loss_config)
+        losses = F.binary_cross_entropy_with_logits(pred, gt)
         return losses
 
 
 class LocalContrastNet3D(nn.Module):
-    def __init__(self, in_ch=1, out_ch=3, min_scale=0.1, max_scale=10.5, radius_num=128,
-                 feat_dims=None, size=3, pool_size=2, stride=2, pad=1, out_pad=0):
+    def __init__(self, in_ch, out_ch, min_scale, max_scale, radius_num, feat_dims,
+                 spt_attn=True, size=3, pool_size=2, stride=2, pad=1, out_pad=0):
         super(LocalContrastNet3D, self).__init__()
-        if feat_dims is None:
-            feat_dims = [64, 128, 256, 512]
-        self.min_scale, self.max_scale = min_scale, max_scale
+        self.min_scale, self.max_scale, self.spt_attn = min_scale, max_scale, spt_attn
         # encoder part
         self.encoder1 = SingleEncoder3d(in_ch, feat_dims[0], size, pool_size, pad, apply_pool=False)
         self.encoder2 = SingleEncoder3d(feat_dims[0], feat_dims[1], size, pool_size, pad, apply_pool=True)
@@ -431,10 +421,11 @@ class LocalContrastNet3D(nn.Module):
         self.decoder2 = SingleDecoder3d(feat_dims[2] + feat_dims[1], feat_dims[1], size, stride, pad, out_pad)
         self.decoder3 = SingleDecoder3d(feat_dims[1] + feat_dims[0], feat_dims[0], size, stride, pad, out_pad)
         # spatial attention part
-        self.level_attention1 = SpatialAttention3d(feat_dims[0], min_scale, max_scale, size, pad)
-        self.level_attention2 = SpatialAttention3d(feat_dims[1], min_scale, max_scale, size, pad)
-        self.level_attention3 = SpatialAttention3d(feat_dims[2], min_scale, max_scale, size, pad)
-        self.global_attention = SpatialAttention3d(feat_dims[0], min_scale, max_scale, size, pad, radius_num, 3)
+        if self.spt_attn:
+            self.level_attention1 = SpatialAttention3d(feat_dims[0], min_scale, max_scale, size, pad)
+            self.level_attention2 = SpatialAttention3d(feat_dims[1], min_scale, max_scale, size, pad)
+            self.level_attention3 = SpatialAttention3d(feat_dims[2], min_scale, max_scale, size, pad)
+            self.global_attention = SpatialAttention3d(feat_dims[0], min_scale, max_scale, size, pad, radius_num, 3)
         # final conv
         self.recon_conv = nn.Conv3d(feat_dims[0], in_ch, 1)
         self.direction_conv = nn.Conv3d(feat_dims[0], out_ch, 1)
@@ -449,14 +440,21 @@ class LocalContrastNet3D(nn.Module):
         x4 = self.encoder4(x3)
 
         # apply attention
-        attention1 = self.level_attention1(im, x1)
-        x1 = torch.mul(attention1, x1)
-        x = F.interpolate(im, scale_factor=0.5, mode='trilinear')
-        attention2 = self.level_attention2(x, x2)
-        x2 = torch.mul(attention2, x2)
-        x = F.interpolate(x, scale_factor=0.5, mode='trilinear')
-        attention3 = self.level_attention3(x, x3)
-        x3 = torch.mul(attention3, x3)
+        attentions = []
+        if self.spt_attn:
+            attention1 = self.level_attention1(im, x1)
+            x1 = torch.mul(attention1, x1)
+            attentions.append(attention1)
+
+            x = F.interpolate(im, scale_factor=0.5, mode='trilinear')
+            attention2 = self.level_attention2(x, x2)
+            x2 = torch.mul(attention2, x2)
+            attentions.append(attention1)
+
+            x = F.interpolate(x, scale_factor=0.5, mode='trilinear')
+            attention3 = self.level_attention3(x, x3)
+            x3 = torch.mul(attention3, x3)
+            attentions.append(attention1)
 
         # decoding
         x = self.decoder1(x3, x4)
@@ -467,27 +465,52 @@ class LocalContrastNet3D(nn.Module):
         recon = self.recon_conv(x)
         direction = self.direction_conv(x)
         radius = torch.sigmoid(self.radius_conv(x)) * self.max_scale + self.min_scale
-        attention = self.global_attention(im, x, radius).squeeze(1)
-        attentions = [attention1, attention2, attention3, attention]
+
+        # output dicts
         output = {
             'recon': recon,
             'radius': radius,
-            'vessel': direction,
-            'attentions': attentions
+            'vessel': direction
         }
+
+        # global attention
+        if self.spt_attn:
+            global_attn = self.global_attention(im, x, radius).squeeze(1)
+            attentions.append(global_attn)
+            output['attentions'] = attentions
+
         # calculate the losses
         losses = vessel_loss(im, output, loss_config) if loss_config is not None else None
         return output, losses
 
 
 if __name__ == '__main__':
-    from torchsummary import summary
+    from torchinfo import summary
+
     feature_dims = [64, 128, 256, 512]
+    _loss_config = {
+        "lambda_flux": 5.0,
+        "lambda_recon": 1.0,
+        "lambda_direction": 1.0,
+        "lambda_intensity": 1.0,
+        "flux_sample_num": 128,
+        "sample_num": 16
+    }
+
     """ 3D UNet Test """
-    contrast_model = LocalContrastNet3D(1, 3, 0.1, 10.5, 128, feature_dims).cuda(2)
-    print(type(contrast_model).__name__)
-    summary(contrast_model, input_size=(8, 1, 64, 64, 64))
+    unet_3d = UNet3D(1, 1, feature_dims)
+    print(type(unet_3d).__name__)
+    summary(unet_3d, input_size=[(8, 1, 16, 16, 16), (8, 1, 16, 16, 16)])
+
+    contrast_model_3d = LocalContrastNet3D(1, 3, 0.1, 10.5, 128, feature_dims)
+    print(type(contrast_model_3d).__name__)
+    summary(contrast_model_3d, input_data=[torch.randn((8, 1, 16, 16, 16)), _loss_config])
+
     """ 2D UNet Test """
-    vessel_seg_model_2d = UNet2D(1, 2, 0.1, 10.5, 128, feature_dims).cuda(0)
-    print(type(vessel_seg_model_2d).__name__)
-    summary(vessel_seg_model_2d, input_size=(8, 3, 256, 256))
+    unet_2d = UNet2D(1, 1, feature_dims)
+    print(type(unet_2d).__name__)
+    summary(unet_2d, input_size=[(8, 1, 16, 16), (8, 1, 16, 16)])
+
+    contrast_model_2d = LocalContrastNet2D(1, 2, 0.1, 10.5, 128, feature_dims)
+    print(type(contrast_model_2d).__name__)
+    summary(contrast_model_2d, input_data=[torch.randn((8, 1, 16, 16)), _loss_config])

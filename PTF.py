@@ -233,9 +233,9 @@ def sample_curve(flux, rads, sample_num, dir_num=32, prob_num=10, cs_pt_num=5, m
         for j in range(sample_num if dim == 5 else 1):
             k2 = torch.ones(b, device=device) * sample_space[j] / 1.0 if dim == 5 else None
             # model the tube and calculate prior [B, SN], [B, SN, PN, 2/3]
-            prior, path = model_tube(flux, init_frame, avg_rad, prob_num, cs_pt_num, min_rad * step_len, k1, k2)
+            prior, path = model_tube(flux, init_frame, avg_rad, prob_num, cs_pt_num, avg_rad * step_len, k1, k2)
             # get the best prior under current curvature sampling
-            prior = (prior > 0.01) * prior
+            # prior = (prior > 0.01) * prior
             indices = torch.argwhere(prior > optimal_prior)
             # update the results
             optimal_k1[indices[:, 0], indices[:, 1]] = sample_space[i]

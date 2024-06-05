@@ -282,7 +282,7 @@ def read_json(config_file):
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('-c', '--config_file', type=str, default='./configs/drive/adaptive_lc.json')
+parser.add_argument('-c', '--config_file', type=str, default='./configs/vessel12/adaptive_lc.json')
 
 
 if __name__ == '__main__':

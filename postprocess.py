@@ -13,12 +13,13 @@ import SimpleITK as sitk
 
 from tqdm import tqdm
 from PTF import sample_curve
+from loss import get_sampling_vec
 from torch.utils.data import DataLoader
 from dataset import DriveLineEndDataset, LSALineEndDataset
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-d', '--data', type=str, default='DRIVE')
-parser.add_argument('-g', '--device', type=str, default='cuda:1')
+parser.add_argument('-g', '--device', type=str, default='cuda:0')
 parser.add_argument('-s', '--split', type=str, default='train')
 parser.add_argument('-b', '--batch_size', type=int, default=1024)
 
@@ -30,9 +31,11 @@ lsa_le_path = '/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/ConnectVessel/tests
 def postprocess(args, params):
     # get the dataset as indicated
     if args.data == 'DRIVE':
-        _dataset = DriveLineEndDataset(drive_le_path, train=args.split == 'train', threshold=0.35, augment=False)
+        _dataset = DriveLineEndDataset(drive_le_path, train=args.split == 'train', threshold=0.19,
+                                       min_len=8, min_size=30, augment=False)
     elif args.data == 'LSA':
-        _dataset = LSALineEndDataset(lsa_le_path, train=args.split == 'train', threshold=0.017, augment=False)
+        _dataset = LSALineEndDataset(lsa_le_path, train=args.split == 'train', threshold=0.017,
+                                     min_len=5, min_size=100, augment=False)
     else:
         raise ValueError('No such dataset type... ')
     data_loader = DataLoader(_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
@@ -47,21 +50,28 @@ def postprocess(args, params):
     for batch in tqdm(data_loader, ncols=80, ascii=True, desc='Post-process: '):
         flux = batch['pred_flux'].to(args.device)
         rads = batch['pred_rads'].to(args.device)
+        dirs = batch['end_dir'].to(args.device)
+        # sampling directions
+        sampling_vecs = get_sampling_vec(params['dir_num'], dim=flux.ndim).to(args.device)
+        similarities = torch.matmul(dirs, sampling_vecs.T).squeeze(1)
+        _, indices = torch.max(similarities, dim=1)
+        # sample the curves from
         optimal_res = sample_curve(flux, rads, **params)
-        batch_indices = torch.arange(flux.shape[0])
-        # find the best match direction
-        _, indices = torch.max(optimal_res['prior'], dim=1)
-        # get the opposite direction
-        indices = indices - params['dir_num'] // 2
-        indices = indices + (indices < 0) * params['dir_num']
+        # # find the best match direction
+        # _, indices = torch.max(optimal_res['prior'], dim=1)
+        # # get the opposite direction
+        # indices = indices - params['dir_num'] // 2
+        # indices = indices + (indices < 0) * params['dir_num']
         # extract the optimal path
+        batch_indices = torch.arange(flux.shape[0])
         optimal_path = optimal_res['path'][batch_indices, indices]
         optimal_prior = optimal_res['prior'][batch_indices, indices]
+        # optimal_k1 = optimal_res['k1'][batch_indices, indices]
         # test
         for i in range(flux.shape[0]):
-            if optimal_prior[i] < 0.2:
+            if optimal_prior[i] < 0.1:
                 continue
-            curr_flux = flux[i][0].detach().cpu().numpy()               # [H, W], [H, W, D]
+            curr_flux = flux[i][0].detach().cpu().numpy()                               # [H, W], [H, W, D]
             curr_idx = batch['image_id'][i].detach().cpu().numpy()
             curr_loc = batch['end_loc'][i][0].round().int().detach().cpu().numpy()      # [2,], [3,]
             curr_path = optimal_path[i].round().int().detach().cpu().numpy()            # [prob_num, 2/3]
@@ -107,10 +117,10 @@ def paste_patch(flux, patch, line_end_loc):
     if patch.ndim == 3:
         start_z = line_end_loc[2]
         end_z = line_end_loc[2] + 2 * patch_size + 1
-        padded_flux[0, start_x:end_x, start_y:end_y, start_z:end_z] = patch
+        padded_flux[0, start_x:end_x, start_y:end_y, start_z:end_z] += (patch > 19) * 5
         new_flux = padded_flux[:, patch_size:-patch_size, patch_size:-patch_size, patch_size:-patch_size]
     else:
-        padded_flux[0, start_x:end_x, start_y:end_y] = patch
+        padded_flux[0, start_x:end_x, start_y:end_y] += (patch > 19) * 5
         new_flux = padded_flux[:, patch_size:-patch_size, patch_size:-patch_size]
     assert new_flux.shape == flux.shape
     return new_flux
@@ -119,11 +129,11 @@ def paste_patch(flux, patch, line_end_loc):
 if __name__ == '__main__':
     arguments = parser.parse_args()
     _params = {
-        'dir_num': 32,
-        'sample_num': 64,
-        'prob_num': 60,
-        'cs_pt_num': 3,
-        'max_k': 0.06,
-        'step_len': 0.25
+        'dir_num': 16,
+        'sample_num': 32,
+        'prob_num': 50,
+        'cs_pt_num': 4,
+        'max_k': 0.05,
+        'step_len': 0.1
     }
     postprocess(arguments, _params)
