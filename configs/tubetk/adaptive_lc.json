@@ -2,7 +2,7 @@
   "name": "TUBETK_ADAPTIVE_LC",
   "data": {
     "type": "TubeTKDataset",
-    "batch_size": 8,
+    "batch_size": 16,
     "args": {
       "data_dir": "../../VesselLearning/Datasets/TubeTK",
       "patch_sizes": [48, 48, 48],
@@ -34,7 +34,7 @@
   },
   "trainer": {
     "train_type": "ADAPTIVE_LC",
-    "gpu_device_num": 2,
+    "gpu_device_num": 4,
     "epoch_num": 200,
     "save_period": 1,
     "resume": false,

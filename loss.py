@@ -207,11 +207,11 @@ def calc_dir_response(curr_dir, curr_rad, gradients, basis, grid_base):
     """ Step 2. Grid sample the gradients based on the sample grid and project on the basis """
     sampled_gradients = grid_sample(gradients, sample_grid, permute=True)           # [B, H, W, D, 3/2, 3/2]
     """ Step 3. Project the sampled gradients on the basis """
-    flux = torch.sum(torch.mul(sampled_gradients, basis), dim=-1)                   # [B, H, W, D, 3/2]
-    flux = torch.mul(flux.unsqueeze(-1), basis)                                     # [B, H, W, D, 3/2, 3/2]
+    projected_flux = torch.sum(torch.mul(sampled_gradients, basis), dim=-1)         # [B, H, W, D, 3/2]
+    flux = torch.mul(projected_flux.unsqueeze(-1), basis)                           # [B, H, W, D, 3/2, 3/2]
     """ Step 4. Project the flux on the sample direction  """
     flux = torch.sum(torch.mul(flux, curr_dir), dim=-1)                             # [B, H, W, D, 3/2]
-    return flux
+    return flux, projected_flux
 
 
 # --------- Loss Functions ---------
@@ -236,22 +236,39 @@ def flux_loss(image, output, sample_num):
     """ Step 5. Get the base sampling grid """
     grid_base = sample_space_to_image_space(get_grid_base(gradients))       # convert to [0, H], [B, H, W, D, 3]
     """ Step 6. Start the for loop to calculate the response """
-    response = torch.zeros(optimal_dir.size(), device=optimal_dir.device)   # [B, H, W, D, 3]
-    for i in range(int(sample_num / 2)):
-        j = i + int(sample_num / 2)
-        sample_dir1, sample_dir2 = sample_vecs[i], sample_vecs[j]           # get the sampling and opposite dir
-        curr_rad1 = estimated_r[..., i:i+1] if estimated_r.size(-1) > 1 else estimated_r    # sampling radius of dir1
-        curr_rad2 = estimated_r[..., j:j+1] if estimated_r.size(-1) > 1 else estimated_r    # opposite radius of dir2
+    response = torch.zeros(optimal_dir.shape, device=optimal_dir.device)    # [B, H, W, D, 3]
+    asym_term = torch.zeros(optimal_dir.shape, device=optimal_dir.device)   # [B, H, W, D, 3]
+    for i in range(sample_num):
+        sample_dir = sample_vecs[i]                                        # get the sampling and opposite dir
+        curr_rad = estimated_r[..., i:i+1] if estimated_r.size(-1) > 1 else estimated_r     # sampling radius of dir
         # calculate the directional response
-        res1 = calc_dir_response(sample_dir1, curr_rad1, gradients, basis, grid_base)   # [B, H, W, D, 3]
-        res2 = calc_dir_response(sample_dir2, curr_rad2, gradients, basis, grid_base)   # [B, H, W, D, 3]
-        # find the min responses of the two dirs
-        response += torch.maximum(res1, res2) * 2 / sample_num
-    response = - torch.sum(response[..., 1:], dim=-1)
-    response = torch.clip(response, min=0.0)                                # clip the response by 0, [B, H, W, D]
+        res, asym = calc_dir_response(sample_dir, curr_rad, gradients, basis, grid_base)          # [B, H, W, D, 3]
+        # accumulate the response and asymmetry term
+        response -= res / sample_num
+        asym_term -= asym / sample_num
+    # calculate the asymmetry term
+    asym_term = torch.sqrt(torch.sum(asym_term[..., 1:] ** 2, dim=-1))
+    response = torch.sum(response[..., 1:], dim=-1) - asym_term * 0.5
+    # clipping
+    response = torch.clip(response, min=0.0)                               # clip the response by 0, [B, H, W, D]
     if 'attentions' in output.keys():
         response = torch.mul(response, output['attentions'][-1] + 1.0)
     return response
+    # for i in range(int(sample_num / 2)):
+    #     j = i + int(sample_num / 2)
+    #     sample_dir1, sample_dir2 = sample_vecs[i], sample_vecs[j]  # get the sampling and opposite dir
+    #     curr_rad1 = estimated_r[..., i:i + 1] if estimated_r.size(-1) > 1 else estimated_r  # sampling radius of dir1
+    #     curr_rad2 = estimated_r[..., j:j + 1] if estimated_r.size(-1) > 1 else estimated_r  # opposite radius of dir2
+    #     # calculate the directional response
+    #     res1, _ = calc_dir_response(sample_dir1, curr_rad1, gradients, basis, grid_base)  # [B, H, W, D, 3]
+    #     res2, _ = calc_dir_response(sample_dir2, curr_rad2, gradients, basis, grid_base)  # [B, H, W, D, 3]
+    #     # find the min responses of the two dirs
+    #     response += torch.maximum(res1, res2) * 2 / sample_num
+    # response = - torch.sum(response[..., 1:], dim=-1)
+    # response = torch.clip(response, min=0.0)  # clip the response by 0, [B, H, W, D]
+    # if 'attentions' in output.keys():
+    #     response = torch.mul(response, output['attentions'][-1] + 1.0)
+    # return response
 
 
 def continuity_loss(image, output, flux_response, sample_num):

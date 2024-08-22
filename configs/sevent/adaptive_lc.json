@@ -2,7 +2,7 @@
   "name": "7T_ADAPTIVE_LC",
   "data": {
     "type": "SevenTDataset",
-    "batch_size": 16,
+    "batch_size": 32,
     "args": {
       "data_dir": "/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/VesselLearning/Datasets/7T_Lirong/organized",
       "patch_sizes": [48, 48, 48],

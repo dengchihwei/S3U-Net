@@ -1,5 +1,5 @@
 {
-  "name": "DRIVE_ADAPTIVE_LC",
+  "name": "DRIVE_LP_20",
   "data": {
     "type": "DriveDataset",
     "batch_size": 10,
@@ -9,18 +9,17 @@
       "train": true,
       "patch_sizes": [256, 256],
       "spacings": [192, 192],
-      "augment": true
+      "augment": true,
+      "reverse": true,
+      "single_ch": true
     }
   },
   "arch": {
-    "type": "LocalContrastNet2D",
-    "supervised": false,
+    "type": "UNet2D",
+    "supervised": true,
     "args": {
       "in_ch": 1,
-      "out_ch": 2,
-      "min_scale": 0.5,
-      "max_scale": 9.5,
-      "radius_num": 128,
+      "out_ch": 1,
       "feat_dims": [64, 128, 256, 512]
     }
   },
@@ -36,22 +35,13 @@
     "gamma": 0.9
   },
   "trainer": {
-    "train_type": "ADAPTIVE_LC",
+    "train_type": "SUPERVISED",
+    "linear_probe": true,
     "gpu_device_num": 1,
     "epoch_num": 2000,
     "save_period": 10,
-    "resume": false,
-    "resume_path": "None",
+    "resume": true,
+    "resume_path": "../trained_models/DRIVE/DRIVE_ADAPTIVE_LC/2024-08-08-16/ADAPTIVE_LC-2000-epoch.pth",
     "checkpoint_dir": "../trained_models/DRIVE"
-  },
-  "loss": {
-    "lambda_flux": 5.0,
-    "lambda_recon": 0.2,
-    "lambda_direction": 1.0,
-    "lambda_intensity": 1.0,
-    "flux_sample_num": 128,
-    "sample_num": 32,
-    "lambda_attention": 1.0,
-    "mean_exp": -0.7
   }
 }

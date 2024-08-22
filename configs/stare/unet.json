@@ -1,0 +1,46 @@
+{
+  "name": "STARE_UNET",
+  "data": {
+    "type": "StareDataset",
+    "batch_size": 32,
+    "args": {
+      "data_dir": "../../VesselLearning/Datasets/STARE/",
+      "image_sizes": null,
+      "train": true,
+      "patch_sizes": [256, 256],
+      "spacings": [192, 192],
+      "augment": true,
+      "reverse": false,
+      "single_ch": false
+    }
+  },
+  "arch": {
+    "type": "UNet2D",
+    "supervised": true,
+    "args": {
+      "in_ch": 3,
+      "out_ch": 1,
+      "feat_dims": [64, 128, 256, 512]
+    }
+  },
+  "optimizer": {
+    "type": "Adam",
+    "learning_rate": 0.001,
+    "weight_decay": 1e-5,
+    "amsgrad": true
+  },
+  "lr_scheduler": {
+    "type": "StepLR",
+    "step_size": 50,
+    "gamma": 0.9
+  },
+  "trainer": {
+    "train_type": "SUPERVISED",
+    "gpu_device_num": 1,
+    "epoch_num": 2000,
+    "save_period": 10,
+    "resume": false,
+    "resume_path": "None",
+    "checkpoint_dir": "../trained_models/STARE"
+  }
+}

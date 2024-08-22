@@ -1,0 +1,42 @@
+{
+  "name": "SMILE_UNET_100",
+  "data": {
+    "type": "SMILEDataset",
+    "batch_size": 24,
+    "args": {
+      "data_dir": "../../VesselLearning/Datasets/SMILE",
+      "patch_sizes": [48, 48, 48],
+      "spacings": [40, 40, 40],
+      "train": true
+    }
+  },
+  "arch": {
+    "type": "UNet3D",
+    "supervised": true,
+    "args": {
+      "in_ch": 1,
+      "out_ch": 1,
+      "feat_dims": [64, 128, 256, 512]
+    }
+  },
+  "optimizer": {
+    "type": "Adam",
+    "learning_rate": 0.001,
+    "weight_decay": 1e-5,
+    "amsgrad": true
+  },
+  "lr_scheduler": {
+    "type": "StepLR",
+    "step_size": 50,
+    "gamma": 0.9
+  },
+  "trainer": {
+    "train_type": "SUPERVISED",
+    "gpu_device_num": 1,
+    "epoch_num": 200,
+    "save_period": 1,
+    "resume": false,
+    "resume_path": "None",
+    "checkpoint_dir": "../trained_models/SMILE"
+  }
+}

@@ -31,19 +31,17 @@ class Trainer(object):
         assert config_file is not None
         self.configer = read_json(config_file)
         # get configer of each part of the training
-        self.loss_conf = self.configer['loss']
+        if 'loss' in self.configer.keys():
+            self.loss_conf = self.configer['loss']
         self.dataset_conf = self.configer['data']
         self.trainer_conf = self.configer['trainer']
 
         # place holder for model related attributes
+        self.supervised = None
         self.logger = None
         self.model = None
         self.optimizer = None
         self.lr_scheduler = None
-
-        # resume or not
-        if self.trainer_conf['resume']:
-            self.resume_checkpoint()
 
     def get_logger(self):
         """
@@ -85,6 +83,8 @@ class Trainer(object):
         # model distribution for multiple GPU devices
         if self.trainer_conf['gpu_device_num'] > 1:
             model = DataParallel(model, device_ids=list(range(self.trainer_conf['gpu_device_num'])))
+        if 'supervised' in self.configer['arch'].keys():
+            self.supervised = self.configer['arch']['supervised']
         model = model.cuda()
         return model
 
@@ -147,7 +147,11 @@ class Trainer(object):
             images = batch['image'].cuda()
 
             # losses from loss function
-            _, batch_losses = self.model(images, self.loss_conf)
+            if self.supervised:
+                gts = batch['label'].cuda()
+                _, batch_losses = self.model(images, gts)
+            else:
+                _, batch_losses = self.model(images, self.loss_conf)
 
             # first batch initialization loss
             if idx == 0:
@@ -201,6 +205,11 @@ class Trainer(object):
         # resume training
         if self.trainer_conf['resume']:
             self.resume_checkpoint()
+
+        # freeze the network or not
+        if 'linear_probe' in self.trainer_conf.keys() and self.trainer_conf['linear_probe']:
+            self.model.freeze_unet()
+            print('Linear probing, all encoders and decoders are frozen.')
 
         # clear all the content of the logger file
         self.logger.flush()
@@ -258,15 +267,24 @@ class Trainer(object):
         checkpoint = torch.load(self.trainer_conf['resume_path'])
 
         # load state dicts
+        multi_gpu = self.trainer_conf['gpu_device_num'] > 1
         if checkpoint['configer']['arch'] != self.configer['arch']:
-            raise ValueError('Checkpoint Architecture Does Not Match to The Config File.')
-        self.model.module.load_state_dict(checkpoint['model'])
-
-        # load optimizer dicts
-        if checkpoint['configer']['optimizer']['type'] != self.configer['optimizer']['type']:
-            raise ValueError('Checkpoint Optimizer Does Not Match to The Config File.')
-        self.optimizer.load_state_dict(checkpoint['optimizer'])
-        print('Optimizer resumed from before.')
+            print('Attention!! Checkpoint Architecture Does Not Match to The Config File.')
+            print('Fine-tuning Mode. Not continue training.')
+            # load the attributes that in the current model
+            model_dict = (self.model.module if multi_gpu else self.model).state_dict()
+            chkpt_dict = {k: v for k, v in checkpoint['model'].items() if k in model_dict}
+            model_dict.update(chkpt_dict)
+            (self.model.module if multi_gpu else self.model).load_state_dict(model_dict)
+        else:
+            print('Continue Training Mode.')
+            # load the attributes that in the current model
+            (self.model.module if multi_gpu else self.model).load_state_dict(checkpoint['model'])
+            # load optimizer dicts
+            if checkpoint['configer']['optimizer']['type'] != self.configer['optimizer']['type']:
+                raise ValueError('Checkpoint Optimizer Does Not Match to The Config File.')
+            self.optimizer.load_state_dict(checkpoint['optimizer'])
+            print('Optimizer resumed from before.')
         self.logger.write("Resume training from epoch {}".format(checkpoint['epoch']))
 
 
@@ -282,10 +300,11 @@ def read_json(config_file):
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('-c', '--config_file', type=str, default='./configs/vessel12/adaptive_lc.json')
+parser.add_argument('-c', '--config_file', type=str, default='./configs/drive/unet.json')
 
 
 if __name__ == '__main__':
+    os.environ['CUDA_VISIBLE_DEVICES'] = '5'
     args = parser.parse_args()
     trainer = Trainer(args.config_file)
     trainer.train()

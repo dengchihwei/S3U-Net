@@ -1,5 +1,5 @@
 {
-  "name": "LSA_ADAPTIVE_LC",
+  "name": "LSA_LP_20",
   "data": {
     "type": "LSADataset",
     "batch_size": 16,
@@ -11,13 +11,11 @@
     }
   },
   "arch": {
-    "type": "LocalContrastNet3D",
+    "type": "UNet3D",
+    "supervised": true,
     "args": {
       "in_ch": 1,
-      "out_ch": 3,
-      "min_scale": 0.5,
-      "max_scale": 10.5,
-      "radius_num": 128,
+      "out_ch": 1,
       "feat_dims": [64, 128, 256, 512]
     }
   },
@@ -33,20 +31,13 @@
     "gamma": 0.9
   },
   "trainer": {
-    "train_type": "ADAPTIVE_LC",
-    "gpu_device_num": 4,
+    "train_type": "SUPERVISED",
+    "linear_probe": true,
+    "gpu_device_num": 1,
     "epoch_num": 200,
     "save_period": 1,
-    "resume": false,
-    "resume_path": "None",
+    "resume": true,
+    "resume_path": "../trained_models/LSA/LSA_ADAPTIVE_LC/2024-08-05-10/ADAPTIVE_LC-200-epoch.pth",
     "checkpoint_dir": "../trained_models/LSA"
-  },
-  "loss": {
-    "lambda_flux": 5.0,
-    "lambda_recon": 1.0,
-    "lambda_direction": 1.0,
-    "lambda_intensity": 1.0,
-    "flux_sample_num": 128,
-    "sample_num": 32
   }
 }

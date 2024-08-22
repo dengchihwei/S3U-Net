@@ -276,6 +276,20 @@ class UNet2D(nn.Module):
         self.pred = nn.Conv2d(feat_dims[0], out_ch, 1)
         Initializer.weights_init(self)
 
+    def freeze_unet(self):
+        self.freeze_layer(self.encoder1)
+        self.freeze_layer(self.encoder2)
+        self.freeze_layer(self.encoder3)
+        self.freeze_layer(self.encoder4)
+        self.freeze_layer(self.decoder1)
+        self.freeze_layer(self.decoder2)
+        self.freeze_layer(self.decoder3)
+
+    @staticmethod
+    def freeze_layer(layer):
+        for param in layer.parameters():
+            param.requires_grad = False
+
     def forward(self, im, gt):
         x1 = self.encoder1(im)
         x2 = self.encoder2(x1)
@@ -290,8 +304,8 @@ class UNet2D(nn.Module):
         pred = self.pred(x)
 
         # calculate the losses
-        losses = F.binary_cross_entropy_with_logits(pred, gt)
-        return losses
+        losses = {'total_loss': F.binary_cross_entropy_with_logits(pred, gt).unsqueeze(0)}
+        return pred, losses
 
 
 class LocalContrastNet2D(nn.Module):
@@ -388,6 +402,20 @@ class UNet3D(nn.Module):
         self.pred = nn.Conv3d(feat_dims[0], out_ch, 1)
         Initializer.weights_init(self)
 
+    def freeze_unet(self):
+        self.freeze_layer(self.encoder1)
+        self.freeze_layer(self.encoder2)
+        self.freeze_layer(self.encoder3)
+        self.freeze_layer(self.encoder4)
+        self.freeze_layer(self.decoder1)
+        self.freeze_layer(self.decoder2)
+        self.freeze_layer(self.decoder3)
+
+    @staticmethod
+    def freeze_layer(layer):
+        for param in layer.parameters():
+            param.requires_grad = False
+
     def forward(self, im, gt):
         x1 = self.encoder1(im)
         x2 = self.encoder2(x1)
@@ -402,8 +430,8 @@ class UNet3D(nn.Module):
         pred = self.pred(x)
 
         # calculate the losses
-        losses = F.binary_cross_entropy_with_logits(pred, gt)
-        return losses
+        losses = {'total_loss': F.binary_cross_entropy_with_logits(pred, gt).unsqueeze(0)}
+        return pred, losses
 
 
 class LocalContrastNet3D(nn.Module):
@@ -478,8 +506,6 @@ class LocalContrastNet3D(nn.Module):
             global_attn = self.global_attention(im, x, radius).squeeze(1)
             attentions.append(global_attn)
             output['attentions'] = attentions
-
-        # calculate the losses
         losses = vessel_loss(im, output, loss_config) if loss_config is not None else None
         return output, losses
 
