@@ -2,7 +2,7 @@
   "name": "DRIVE_ADAPTIVE_LC",
   "data": {
     "type": "DriveDataset",
-    "batch_size": 10,
+    "batch_size": 8,
     "args": {
       "data_dir": "../../VesselLearning/Datasets/DRIVE/",
       "image_sizes": null,
@@ -19,7 +19,7 @@
       "in_ch": 1,
       "out_ch": 2,
       "min_scale": 0.5,
-      "max_scale": 9.5,
+      "max_scale": 19.5,
       "radius_num": 128,
       "feat_dims": [64, 128, 256, 512]
     }
@@ -33,15 +33,15 @@
   "lr_scheduler": {
     "type": "StepLR",
     "step_size": 50,
-    "gamma": 0.9
+    "gamma": 0.5
   },
   "trainer": {
     "train_type": "ADAPTIVE_LC",
-    "gpu_device_num": 1,
+    "gpu_device_num": 2,
     "epoch_num": 2000,
     "save_period": 10,
     "resume": false,
-    "resume_path": "None",
+    "resume_path": null,
     "checkpoint_dir": "../trained_models/DRIVE"
   },
   "loss": {

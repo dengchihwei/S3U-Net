@@ -1,8 +1,8 @@
 {
-  "name": "DRIVE_LP_20",
+  "name": "DRIVE_UNET_40",
   "data": {
     "type": "DriveDataset",
-    "batch_size": 10,
+    "batch_size": 16,
     "args": {
       "data_dir": "../../VesselLearning/Datasets/DRIVE/",
       "image_sizes": null,
@@ -10,15 +10,15 @@
       "patch_sizes": [256, 256],
       "spacings": [192, 192],
       "augment": true,
-      "reverse": true,
-      "single_ch": true
+      "reverse": false,
+      "single_ch": false
     }
   },
   "arch": {
     "type": "UNet2D",
     "supervised": true,
     "args": {
-      "in_ch": 1,
+      "in_ch": 3,
       "out_ch": 1,
       "feat_dims": [64, 128, 256, 512]
     }
@@ -36,12 +36,12 @@
   },
   "trainer": {
     "train_type": "SUPERVISED",
-    "linear_probe": true,
+    "linear_probe": false,
     "gpu_device_num": 1,
     "epoch_num": 2000,
     "save_period": 10,
-    "resume": true,
-    "resume_path": "../trained_models/DRIVE/DRIVE_ADAPTIVE_LC/2024-08-08-16/ADAPTIVE_LC-2000-epoch.pth",
+    "resume": false,
+    "resume_path": null,
     "checkpoint_dir": "../trained_models/DRIVE"
   }
 }

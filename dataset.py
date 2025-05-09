@@ -10,6 +10,7 @@ import sknw
 import torch
 import random
 import numpy as np
+import scipy.io as sio
 import SimpleITK as SiTk
 import monai.transforms as tf
 
@@ -19,7 +20,8 @@ from ietk import methods
 from torch.utils.data import Dataset
 from scipy.ndimage import gaussian_filter
 from skimage.measure import label as connected
-from skimage.morphology import binary_erosion,  binary_closing, remove_small_objects, skeletonize, skeletonize_3d
+from skimage.morphology import binary_erosion, binary_closing, remove_small_objects, skeletonize, skeletonize_3d, \
+    binary_opening
 
 
 class VesselDataset(Dataset):
@@ -53,7 +55,8 @@ class VesselDataset(Dataset):
         curr_subject = self.subjects[image_idx]
         image = curr_subject['image']
         mask = curr_subject['mask'] > 0.001 if 'mask' in curr_subject.keys() else None
-        label = curr_subject['label'] > 0.5 if 'label' in curr_subject.keys() else None
+        # label = curr_subject['label'] > 0.5 if 'label' in curr_subject.keys() else None
+        label = curr_subject['label'].astype(np.float32) if 'label' in curr_subject.keys() else None
         # get image, label and mask patch
         if patch_idx is not None:
             start_coord = self.get_start_coord(image_idx, image.shape[1:], patch_idx)
@@ -76,11 +79,11 @@ class VesselDataset(Dataset):
         # filter out the invalid patches
         if abs(torch.mean(image_patch)) == 1.0 and index < self.total_patch_num - 1:
             return self.__getitem__(index + 1)
-
         item = {
             'image_id': image_idx,
             'image': image_patch.float()
         }
+
         if start_coord is not None:
             item['start_coord'] = torch.LongTensor(start_coord)
         if label_patch is not None:
@@ -184,7 +187,7 @@ class VesselDataset(Dataset):
             max_val, min_val = min(thresh[0], image.max()), max(thresh[1], image.min())
             image = np.clip(image, a_max=max_val, a_min=min_val)
         max_val, min_val = image.max(), image.min()
-        return 2.0 * (image - min_val) / (max_val - min_val) - 1.0
+        return 2.0 * (image - min_val) / ((max_val - min_val) + 1e-10) - 1.0
 
     @staticmethod
     def flip(img_patch, gt_patch, p=0.5):
@@ -267,7 +270,10 @@ class DriveDataset(VesselDataset):
         self.label_files = [os.path.join(label_path, file) for file in sorted(os.listdir(label_path))]
         # select certain ratio
         total_num, ratio = len(self.mask_files), 1.0
-        indices = random.sample(range(len(self.mask_files)), k=int(total_num * ratio))
+        if train:
+            indices = random.sample(range(len(self.mask_files)), k=int(total_num * ratio))
+        else:
+            indices = range(int(len(self.mask_files) * ratio))
         self.mask_files = [self.mask_files[i] for i in indices]
         self.image_files = [self.image_files[i] for i in indices]
         self.label_files = [self.label_files[i] for i in indices]
@@ -321,7 +327,7 @@ class TubeTKDataset(VesselDataset):
     def __init__(self, data_dir, train=True, patch_sizes=(64, 64, 64), spacings=(48, 48, 48)):
         super(TubeTKDataset, self).__init__(patch_sizes, spacings, False)
         # get all the subject folder path
-        subject_folders = sorted(os.listdir(data_dir))
+        subject_folders = sorted(os.listdir(data_dir))[:5]
         # iterate all the folders to load images
         for folder in tqdm(subject_folders, ncols=80, ascii=True):
             subject_path = os.path.join(data_dir, folder)
@@ -336,7 +342,8 @@ class TubeTKDataset(VesselDataset):
                 'subject_name': folder,
                 'image': np.expand_dims(self.normalize(image), axis=0),
                 'patch_dim': patch_dim,
-                'patch_num': patch_num
+                'patch_num': patch_num,
+                'meta_data': SiTk.ReadImage(mra_path)
             }
             if 'AuxillaryData' in modalities and not train:
                 label_path = os.path.join(subject_path, '{}_LABEL.npy'.format(folder))
@@ -378,8 +385,9 @@ class Vessel12Dataset(VesselDataset):
                 'patch_num': patch_num,
                 'meta_data': SiTk.ReadImage(ct_path)
             }
-            if label_path in os.listdir(subject_path):
+            if '{}_Annotations.csv'.format(folder) in os.listdir(subject_path):
                 curr_subj['label'] = self.read_csv(label_path)
+                # pass
             self.subjects.append(curr_subj)
 
 
@@ -396,8 +404,10 @@ class SevenTDataset(VesselDataset):
                 continue
             mra_path = os.path.join(subject_path, '{}_TOF.nii.gz'.format(folder))
             mask_path = os.path.join(subject_path, '{}_TOF_MASKED.nii.gz'.format(folder))
+            label_path = os.path.join(subject_path, '{}_GT.nii.gz'.format(folder))
             image = SiTk.GetArrayFromImage(SiTk.ReadImage(mra_path))
             mask = SiTk.GetArrayFromImage(SiTk.ReadImage(mask_path))
+            label = SiTk.GetArrayFromImage(SiTk.ReadImage(label_path)) if split == 'test' else None
             # crop the valid sizes
             if train:
                 valid_poses = np.argwhere(mask > 0)
@@ -413,9 +423,11 @@ class SevenTDataset(VesselDataset):
                 'subject_name': folder,
                 'mask': np.expand_dims(mask, axis=0),
                 'image': np.expand_dims(self.normalize(image, (400, 0)), axis=0),
+                'label': np.expand_dims(label, axis=0),
                 'patch_dim': patch_dim,
                 'patch_num': patch_num,
-                'meta_data': SiTk.ReadImage(mask_path)
+                'meta_data': SiTk.ReadImage(mask_path),
+
             }
             self.subjects.append(curr_subj)
 
@@ -467,16 +479,86 @@ class SMILEDataset(VesselDataset):
         for subject in tqdm(subjects, ncols=80, ascii=True, desc='Loading Data: '):
             subject_name = subject.split('.')[0]
             image_path = os.path.join(dataset_folder, split, subject)
-            label_path = os.path.join(dataset_folder, '{}_label'.format(split), '{}.nii'.format(subject_name))
+            label_path = os.path.join(dataset_folder, '{}_label'.format(split), '{}.nii.gz'.format(subject_name))
+            mask_path = os.path.join(dataset_folder, '{}_mask'.format(split), '{}_mask.nii.gz'.format(subject_name))
+            # mask_path = os.path.join(dataset_folder, '{}_label'.format(split), '{}_small.nii.gz'.format(subject_name))
             # read image
             image = SiTk.GetArrayFromImage(SiTk.ReadImage(image_path))
             label = SiTk.GetArrayFromImage(SiTk.ReadImage(label_path))
+            mask = SiTk.GetArrayFromImage(SiTk.ReadImage(mask_path))
             patch_dim = np.ceil((np.array(image.shape) - self.patch_sizes) / self.spacings + 1).astype(int)
             patch_num = np.prod(patch_dim)
             curr_subj = {
                 'subject_name': subject_name,
                 'image': np.expand_dims(self.normalize(image, (400, 0)), axis=0),
+                # 'image': np.expand_dims(image, axis=0),
                 'label': np.expand_dims(label, axis=0),
+                '_mask': np.expand_dims(mask, axis=0),
+                'patch_dim': patch_dim,
+                'patch_num': patch_num,
+                'meta_data': SiTk.ReadImage(image_path)
+            }
+            self.subjects.append(curr_subj)
+            self.total_patch_num += patch_num
+
+
+class ADVCIDDataset(VesselDataset):
+    def __init__(self, data_dir, train=True, patch_sizes=(64, 64, 64), spacings=(48, 48, 48)):
+        super(ADVCIDDataset, self).__init__(patch_sizes, spacings, False)
+        image_dir = os.path.join(data_dir, 'nifti')
+        mask_dir = os.path.join(data_dir, 'nifti_mask')
+        # get all the subject path
+        subjects = sorted(os.listdir(image_dir))
+        subjects = subjects[:25] if train else subjects[25:]
+        for subject in tqdm(subjects, ncols=80, ascii=True):
+            subject_id = subject.split('.')[0]
+            data_path = os.path.join(image_dir, '{}.nii.gz'.format(subject_id))
+            mask_path = os.path.join(mask_dir, '{}_mask.nii.gz'.format(subject_id))
+            image = SiTk.GetArrayFromImage(SiTk.ReadImage(data_path))
+            mask = SiTk.GetArrayFromImage(SiTk.ReadImage(mask_path))
+            # crop the valid sizes
+            # if train:
+            #     valid_poses = np.argwhere(mask > 0)
+            #     min_x, min_y, min_z = np.clip(np.min(valid_poses, axis=0) - 8, a_min=0, a_max=None)
+            #     max_x, max_y, max_z = np.max(valid_poses, axis=0) + 8
+            #     mask = mask[min_x:max_x, min_y:max_y, min_z:max_z]
+            #     image = image[min_x:max_x, min_y:max_y, min_z:max_z]
+            # assert image.shape == mask.shape
+            patch_dim = np.ceil((np.array(image.shape) - patch_sizes) / spacings + 1).astype(int)
+            patch_num = np.prod(patch_dim)
+            self.total_patch_num += patch_num
+            curr_subj = {
+                'subject_name': subject_id,
+                'mask': np.expand_dims(mask, axis=0),
+                'image': np.expand_dims(self.normalize(image, (400, 0)), axis=0),
+                'patch_dim': patch_dim,
+                'patch_num': patch_num,
+                'meta_data': SiTk.ReadImage(mask_path)
+            }
+            self.subjects.append(curr_subj)
+
+
+class TMIDataset(VesselDataset):
+    def __init__(self, patch_sizes, spacings, data_dir, train=True, foreground=True):
+        super(TMIDataset, self).__init__(patch_sizes, spacings, False)
+        data_path = os.path.join(data_dir, 'nii_masked')
+        gt_path = os.path.join(data_dir, 'ground_truth')
+        # total number of subjects
+        subjects = sorted(os.listdir(data_path))
+        split_index = int(0.8 * len(subjects))
+        subjects = subjects[:split_index] if train else subjects[split_index:]
+        for i, subject_name in enumerate(tqdm(subjects, ncols=80, ascii=True)):
+            index = subject_name.split('.')[0].split('_')[0]
+            image_path = os.path.join(data_path, '{}_masked.nii'.format(index))
+            label_path = os.path.join(gt_path, '{}.mat'.format(index))
+            # read image data
+            image = SiTk.ReadImage(image_path)
+            image = SiTk.GetArrayFromImage(image)
+            patch_dim = np.ceil((np.array(image.shape) - self.patch_sizes) / self.spacings + 1).astype(int)
+            patch_num = np.prod(patch_dim)
+            curr_subj = {
+                'subject_name': subject_name,
+                'image': np.expand_dims(-self.normalize(image, (400, 0)), axis=0),
                 'patch_dim': patch_dim,
                 'patch_num': patch_num,
                 'meta_data': SiTk.ReadImage(image_path)
@@ -512,16 +594,13 @@ class LineEndDataset(Dataset):
         end_dir = self.subjects[image_idx]['ends_dirs'][end_index]
 
         # crop the image features
-        flux_patch = self.crop_feature(self.subjects[image_idx]['flux'], end_loc)
-        rads_patch = self.crop_feature(self.subjects[image_idx]['rads'], end_loc)
-        dirs_patch = self.crop_feature(self.subjects[image_idx]['dirs'], end_loc)
+        flux_patch = self.crop_feature(self.subjects[image_idx]['padded_flux'], end_loc)
+        rads_patch = self.crop_feature(self.subjects[image_idx]['padded_rads'], end_loc)
+        dirs_patch = self.crop_feature(self.subjects[image_idx]['padded_dirs'], end_loc)
 
-        if 'mask' in self.subjects[image_idx].keys():
-            mask_patch = self.crop_feature(self.subjects[image_idx]['mask'] > 0.5, end_loc)
+        if 'padded_mask' in self.subjects[image_idx].keys():
+            mask_patch = self.crop_feature(self.subjects[image_idx]['padded_mask'] > 0.5, end_loc)
             flux_patch = np.multiply(flux_patch, mask_patch)
-        if self.augment and len(flux_patch.shape) == 2:
-            flux_patch = self.flip(flux_patch)
-            flux_patch = self.rotate(flux_patch)
 
         # convert to torch types
         item = {
@@ -541,17 +620,17 @@ class LineEndDataset(Dataset):
         :param end_loc: location of line end
         :return: cropped the features [C, PS, PS], [C, PS, PS, PS]
         """
-        pad_size = (self.patch_size, self.patch_size)
-        pad_width = ((0, 0), pad_size, pad_size, pad_size) if feature.ndim == 4 else ((0, 0), pad_size, pad_size)
-        padded_feature = np.pad(feature, pad_width)
+        # pad_size = (self.patch_size, self.patch_size)
+        # pad_width = ((0, 0), pad_size, pad_size, pad_size) if feature.ndim == 4 else ((0, 0), pad_size, pad_size)
+        # padded_feature = np.pad(feature, pad_width)
         start_x, start_y = end_loc[:2]
         end_x, end_y = end_loc[:2] + 2 * self.patch_size + 1
         if feature.ndim == 4:
             start_z = end_loc[2]
             end_z = end_loc[2] + 2 * self.patch_size + 1
-            patch_feature = padded_feature[:, start_x:end_x, start_y:end_y, start_z:end_z]
+            patch_feature = feature[:, start_x:end_x, start_y:end_y, start_z:end_z]
         else:
-            patch_feature = padded_feature[:, start_x:end_x, start_y:end_y]
+            patch_feature = feature[:, start_x:end_x, start_y:end_y]
         return patch_feature
 
     def binarize(self, flux, mask=None):
@@ -563,10 +642,9 @@ class LineEndDataset(Dataset):
         """
         if mask is not None:
             flux = np.multiply(flux, mask)
-        flux = gaussian_filter(flux, sigma=0.7)
+        flux = gaussian_filter(flux, sigma=0.5)
         flux = flux > self.threshold
-        flux = binary_closing(flux)
-        # flux = median_filter(flux, size=3)
+        # flux = binary_closing(flux)
         flux = remove_small_objects(flux, min_size=self.min_size)
         return flux
 
@@ -587,6 +665,12 @@ class LineEndDataset(Dataset):
         ends_dirs = valid_nodes_dirs
         return ends_locs, ends_dirs
 
+    def pad_feature(self, feature):
+        pad_size = (self.patch_size, self.patch_size)
+        pad_width = ((0, 0), pad_size, pad_size, pad_size) if feature.ndim == 4 else ((0, 0), pad_size, pad_size)
+        padded_feature = np.pad(feature, pad_width)
+        return padded_feature
+
     @staticmethod
     def extract_skeleton(binary_response):
         """
@@ -596,7 +680,7 @@ class LineEndDataset(Dataset):
         """
         # skeletonize the image
         skel_func = skeletonize_3d if binary_response.ndim == 3 else skeletonize
-        skeleton = skel_func(binary_response)
+        skeleton = skel_func(binary_response) / 255.0
         return skeleton
 
     @staticmethod
@@ -610,51 +694,18 @@ class LineEndDataset(Dataset):
         """
         skel_labels = connected(skeleton)
         valid_nodes_indices, valid_nodes_dirs = [], []
-        for n_idx in graph.nodes():
+        for n_idx in tqdm(graph.nodes(), ncols=80, ascii=True, desc='Filtering nodes: '):
             start_pos = graph.nodes()[n_idx]['o']
             curr_label = skel_labels[start_pos[0], start_pos[1]]
             if len(graph[n_idx]) == 1:
                 end_idx = list(graph[n_idx])[0]
                 if len(graph[n_idx][end_idx]['pts']) > min_len or np.sum(skel_labels == curr_label) < 30:
                     next_pos = graph[n_idx][end_idx]['pts'][1]
-                    curr_dir = start_pos.astype(np.float64) - next_pos.astype(np.float64)
+                    curr_dir = start_pos.astype(np.float32) - next_pos.astype(np.float32)
                     curr_dir = curr_dir / np.linalg.norm(curr_dir)
                     valid_nodes_indices.append(n_idx)
                     valid_nodes_dirs.append(curr_dir)
         return valid_nodes_indices, valid_nodes_dirs
-
-    @staticmethod
-    def flip(img_patch, p=0.5):
-        """
-        randomly flip the image patch along x and y-axis
-        :param img_patch: image patch array, [C, H, W], [C, H, W, D]
-        :param p: probability of applying the flip
-        :return: img_patch, flipped image patch array
-                 gt_patch, flipped ground truth array
-        """
-        # flip the image horizontally with prob p
-        if np.random.uniform() < p:
-            img_patch = np.flip(img_patch, axis=1)
-        # flip the image vertically with prob p
-        if np.random.uniform() < p:
-            img_patch = np.flip(img_patch, axis=2)
-        return img_patch
-
-    @staticmethod
-    def rotate(img_patch, p=0.5):
-        """
-        randomly rotate the image patch among {0, 90, 180, 270} degrees
-        :param img_patch: image patch array [C, H, W], [C, H, W, D]
-        :param p: probability of applying the rotation
-        :return: img_patch, flipped image patch array
-                 gt_patch, flipped ground truth array
-        """
-        axes = [(1, 2), (1, 3), (2, 3)]
-        if np.random.uniform() < p:
-            k = np.random.randint(0, 4)
-            j = np.random.randint(0, 3)
-            img_patch = np.rot90(img_patch, k, axes=axes[j])
-        return img_patch
 
     @staticmethod
     def normalize(image):
@@ -728,11 +779,13 @@ class LSALineEndDataset(LineEndDataset):
                 'rads': rads,
                 'skel': skeleton,
                 'ends_locs': ends_locs,
-                'ends_dirs': ends_dirs
+                'ends_dirs': ends_dirs,
+                'padded_mask': self.pad_feature(np.expand_dims(mask, axis=0)),
+                'padded_flux': self.pad_feature(np.expand_dims(flux, axis=0)),
+                'padded_dirs': self.pad_feature(dirs),
+                'padded_rads': self.pad_feature(rads)
             }
             self.subjects.append(curr_subject)
-            if i > 2:
-                break
 
 
 class SevenTLineEndDataset(LineEndDataset):
@@ -772,10 +825,61 @@ class SevenTLineEndDataset(LineEndDataset):
                 break
 
 
+class SMILELineEndDataset(LineEndDataset):
+    def __init__(self, data_dir, patch_size=35, threshold=0.0825, min_size=20, min_len=12, augment=False):
+        super(SMILELineEndDataset, self).__init__(patch_size=patch_size, threshold=threshold, min_size=min_size,
+                                                  min_len=min_len, augment=augment)
+        line_ends_path = os.path.join(data_dir, 'line_ends')
+        if os.path.exists(line_ends_path):
+            subjects = sorted(os.listdir(line_ends_path))
+            for i in tqdm(range(len(subjects)), ncols=80, ascii=True, desc='Loading Data: '):
+                curr_subject = np.load(os.path.join(line_ends_path, subjects[i]), allow_pickle=True).item()
+                self.subjects.append(curr_subject)
+                for j in range(curr_subject['ends_locs'].shape[0]):
+                    self.line_end_locs.append((i, j))
+        else:
+            os.makedirs(line_ends_path, exist_ok=True)
+            flux_files = sorted(os.listdir(os.path.join(data_dir, 'new_flux')))
+            for i in tqdm(range(len(flux_files)), ncols=80, ascii=True, desc='Loading Data: '):
+                flux = SiTk.GetArrayFromImage(SiTk.ReadImage(os.path.join(data_dir, 'new_flux', flux_files[i])))
+                dirs = np.ones((3, ) + flux.shape)
+                rads = np.ones((2, ) + flux.shape)
+                rads[0] = 0.5
+                rads[1] = 1.5
+                # start post-process
+                binary_response = self.binarize(flux, None)  # thresholding
+                skeleton = self.extract_skeleton(binary_response)  # skeletonizing
+                ends_locs, ends_dirs = self.extract_line_ends(skeleton)  # extract line end-points
+                for j in range(ends_locs.shape[0]):
+                    self.line_end_locs.append((i, j))
+                curr_subject = {
+                    'subject_name': flux_files[i].split('.')[0],
+                    'meta_data': SiTk.ReadImage(os.path.join(data_dir, 'flux', flux_files[i])),
+                    'flux': np.expand_dims(flux, axis=0),
+                    'dirs': dirs,
+                    'rads': rads,
+                    'skel': skeleton,
+                    'ends_locs': ends_locs,
+                    'ends_dirs': ends_dirs,
+                    'padded_flux': self.pad_feature(np.expand_dims(flux, axis=0)),
+                    'padded_dirs': self.pad_feature(dirs),
+                    'padded_rads': self.pad_feature(rads)
+                }
+                self.subjects.append(curr_subject)
+                np.save(os.path.join(line_ends_path, '{},npy').format(curr_subject['subject_name']), curr_subject)
+
+
+class TubeTKLineEndDataset(LineEndDataset):
+    def __init__(self, data_dir, patch_size=35, threshold=0.0825, min_size=20, min_len=12, augment=False):
+        super(TubeTKLineEndDataset, self).__init__(patch_size=patch_size, threshold=threshold, min_size=min_size,
+                                                  min_len=min_len, augment=augment)
+        pass
+
+
 if __name__ == '__main__':
-    # # define the datasets for unit test
+    # define the datasets for unit test
     # drive_path = '/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/VesselLearning/Datasets/DRIVE'
-    # drive_train = DriveDataset(drive_path, train=True, augment=True)
+    # drive_train = DriveDataset(drive_path, patch_sizes=[256, 256], spacings=[192, 192], train=True, augment=True)
     # drive_valid = DriveDataset(drive_path, train=False, augment=False)
     # print('DRIVE: Train set size: {}; Test set size: {} '.format(len(drive_train), len(drive_valid)))
     # print('DRIVE Patch Size is {}'.format(drive_train[0]['image'].shape))
@@ -833,9 +937,22 @@ if __name__ == '__main__':
     # print('LSA LINE END Patch Size is {}'.format(lsa_le_train[0]['flux'].shape))
     # print('LSA LINE END Patch Size is {}'.format(lsa_le_train[0]['dirs'].shape))
     # print('LSA LINE END Patch Size is {}'.format(lsa_le_train[0]['rads'].shape))
+    #
+    # smile_path = '/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/VesselLearning/Datasets/SMILE'
+    # smile_train = SMILEDataset(smile_path, train=True)
+    # smile_valid = SMILEDataset(smile_path, train=False)
+    # print('SMILE: Train set size: {}; Test set size: {} '.format(len(smile_train), len(smile_valid)))
+    # print('SMILE Patch Size is {}'.format(smile_train[0]['image'].shape))
 
-    smile_path = '/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/VesselLearning/Datasets/SMILE'
-    smile_train = SMILEDataset(smile_path, train=True)
-    smile_valid = SMILEDataset(smile_path, train=False)
-    print('SMILE: Train set size: {}; Test set size: {} '.format(len(smile_train), len(smile_valid)))
-    print('SMILE Patch Size is {}'.format(smile_train[0]['image'].shape))
+    advcid_path = '/ifs/loni/faculty/shi/spectrum/zdeng/MSA_Data/VesselLearning/Datasets/LSA_7T'
+    advcid_train = ADVCIDDataset(advcid_path, train=True)
+    advcid_valid = ADVCIDDataset(advcid_path, train=False)
+    print('ADVCID: Train set size: {}; Test set size: {} '.format(len(advcid_train), len(advcid_valid)))
+    print('ADVCID Patch Size is {}'.format(advcid_train[0]['image'].shape))
+
+    # smile_le_path = '../tests/SMILE/valid-ADAPTIVE_LC-2024-08-22-02-135'
+    # smile_le_valid = SMILELineEndDataset(smile_le_path, patch_size=35, threshold=0.0825,
+    #                                      min_len=6, min_size=12, augment=False)
+    # print('SMILE LINE END: Test set size: {} '.format(len(smile_le_valid)))
+    # print('SMILE LINE END Patch Size is {}'.format(smile_le_valid[0]['end_loc'].shape))
+    # print('SMILE LINE END Patch Size is {}'.format(smile_le_valid[0]['pred_flux'].shape))

@@ -1,8 +1,8 @@
 {
-  "name": "LSA_LP_20",
+  "name": "LSA_UNET_20",
   "data": {
     "type": "LSADataset",
-    "batch_size": 16,
+    "batch_size": 4,
     "args": {
       "data_dir": "../../VesselLearning/Datasets/DarkVessels/UnilateralData",
       "patch_sizes": [48, 48, 48],
@@ -32,12 +32,12 @@
   },
   "trainer": {
     "train_type": "SUPERVISED",
-    "linear_probe": true,
+    "linear_probe": false,
     "gpu_device_num": 1,
-    "epoch_num": 200,
+    "epoch_num": 2000,
     "save_period": 1,
-    "resume": true,
-    "resume_path": "../trained_models/LSA/LSA_ADAPTIVE_LC/2024-08-05-10/ADAPTIVE_LC-200-epoch.pth",
+    "resume": false,
+    "resume_path": null,
     "checkpoint_dir": "../trained_models/LSA"
   }
 }

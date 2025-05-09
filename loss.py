@@ -6,8 +6,10 @@
 
 
 import torch
+import numpy as np
+import nibabel as nib
 import torch.nn.functional as F
-# from PTF import propagate_frame
+from matplotlib import pyplot as plt
 
 
 # --------- Utility Functions ---------
@@ -238,37 +240,25 @@ def flux_loss(image, output, sample_num):
     """ Step 6. Start the for loop to calculate the response """
     response = torch.zeros(optimal_dir.shape, device=optimal_dir.device)    # [B, H, W, D, 3]
     asym_term = torch.zeros(optimal_dir.shape, device=optimal_dir.device)   # [B, H, W, D, 3]
-    for i in range(sample_num):
-        sample_dir = sample_vecs[i]                                        # get the sampling and opposite dir
-        curr_rad = estimated_r[..., i:i+1] if estimated_r.size(-1) > 1 else estimated_r     # sampling radius of dir
+    # asymmetry term implementation
+    for i in range(int(sample_num / 2)):
+        j = i + int(sample_num / 2)
+        sample_dir1, sample_dir2 = sample_vecs[i], sample_vecs[j]  # get the sampling and opposite dir
+        curr_rad1 = estimated_r[..., i:i + 1] if estimated_r.size(-1) > 1 else estimated_r  # sampling radius of dir1
+        curr_rad2 = estimated_r[..., j:j + 1] if estimated_r.size(-1) > 1 else estimated_r  # opposite radius of dir2
         # calculate the directional response
-        res, asym = calc_dir_response(sample_dir, curr_rad, gradients, basis, grid_base)          # [B, H, W, D, 3]
-        # accumulate the response and asymmetry term
-        response -= res / sample_num
-        asym_term -= asym / sample_num
-    # calculate the asymmetry term
+        res1, asym1 = calc_dir_response(sample_dir1, curr_rad1, gradients, basis, grid_base)  # [B, H, W, D, 3]
+        res2, asym2 = calc_dir_response(sample_dir2, curr_rad2, gradients, basis, grid_base)  # [B, H, W, D, 3]
+        # find the min responses of the two dirs
+        # response -= (res1 + res2) / sample_num
+        response -= torch.maximum(res1, res2) * 2 / sample_num
+        asym_term -= (asym1 + asym2) / sample_num
     asym_term = torch.sqrt(torch.sum(asym_term[..., 1:] ** 2, dim=-1))
-    response = torch.sum(response[..., 1:], dim=-1) - asym_term * 0.5
-    # clipping
-    response = torch.clip(response, min=0.0)                               # clip the response by 0, [B, H, W, D]
-    if 'attentions' in output.keys():
-        response = torch.mul(response, output['attentions'][-1] + 1.0)
-    return response
-    # for i in range(int(sample_num / 2)):
-    #     j = i + int(sample_num / 2)
-    #     sample_dir1, sample_dir2 = sample_vecs[i], sample_vecs[j]  # get the sampling and opposite dir
-    #     curr_rad1 = estimated_r[..., i:i + 1] if estimated_r.size(-1) > 1 else estimated_r  # sampling radius of dir1
-    #     curr_rad2 = estimated_r[..., j:j + 1] if estimated_r.size(-1) > 1 else estimated_r  # opposite radius of dir2
-    #     # calculate the directional response
-    #     res1, _ = calc_dir_response(sample_dir1, curr_rad1, gradients, basis, grid_base)  # [B, H, W, D, 3]
-    #     res2, _ = calc_dir_response(sample_dir2, curr_rad2, gradients, basis, grid_base)  # [B, H, W, D, 3]
-    #     # find the min responses of the two dirs
-    #     response += torch.maximum(res1, res2) * 2 / sample_num
-    # response = - torch.sum(response[..., 1:], dim=-1)
-    # response = torch.clip(response, min=0.0)  # clip the response by 0, [B, H, W, D]
+    response = (torch.sum(response[..., 1:], dim=-1) - asym_term * 0.0)
+    response = torch.clip(response, min=0.0)  # clip the response by 0, [B, H, W, D]
     # if 'attentions' in output.keys():
     #     response = torch.mul(response, output['attentions'][-1] + 1.0)
-    # return response
+    return response, asym_term
 
 
 def continuity_loss(image, output, flux_response, sample_num):
@@ -425,9 +415,10 @@ def calc_local_contrast(image, estimated_r, sample_num, scale_steps):
             img_contrast_o += torch.mul(sampled_img_pos_o, sampled_img_neg_o) / sample_num / scale_steps
     # compute the inside / outside ratio
     epsilon = 3e-2 if d else 1e-4
+    # epsilon = 1e-3
     img_local_contrast = torch.div(img_contrast_o, img_contrast_i + epsilon) - 1.0
     # regularization or not
-    img_local_contrast = torch.sigmoid(img_local_contrast)
+    img_local_contrast = torch.tanh(img_local_contrast)
     return img_local_contrast
 
 
@@ -440,7 +431,7 @@ def vessel_loss(image, output, loss_config):
     :return: losses: dict, store the losses
     """
     # flux loss
-    flux_response = flux_loss(image, output, loss_config['flux_sample_num'])
+    flux_response, _ = flux_loss(image, output, loss_config['flux_sample_num'])
     mean_flux_loss = - flux_response.mean() * loss_config['lambda_flux']    # use negative loss to maximize this
     # continuity loss
     direction_loss, intensity_loss = continuity_loss(image, output, flux_response, loss_config['sample_num'])
@@ -464,3 +455,68 @@ def vessel_loss(image, output, loss_config):
         losses['attn_loss'] = mean_att_loss.unsqueeze(0)
     losses['total_loss'] = total_loss.unsqueeze(0)
     return losses
+
+
+# visualization
+def contrast_vis(path, loc, patch_size):
+    x, y, z = loc
+    ps = patch_size
+    image = nib.load(path).get_fdata()
+    max_val, min_val = image.max(), image.min()
+    image = 1.0 * (image - min_val) / (max_val - min_val)
+    print(image.shape)
+    image_patch = image[x-ps:x+ps, y-ps:y+ps, z-ps:z+ps]
+    image_patch = torch.from_numpy(image_patch)
+    max_val, min_val = image_patch.max(), image_patch.min()
+    image_patch = 1.0 * (image_patch - min_val) / (max_val - min_val)
+    image_patch = image_patch.unsqueeze(0).unsqueeze(0).float()
+
+    # calculate the local contrast
+    test_radius = torch.zeros_like(image_patch)
+    test_radius[:, 0, :, :, :] = 4.0
+    image_lc = calc_local_contrast(image_patch, test_radius, 16, 5)
+    image_lc = torch.clip(image_lc, 0)
+    # max_val, min_val = image_lc.max(), image_lc.min()
+    # image_lc = 1.0 * (image_lc - min_val) / (max_val - min_val)
+
+    # plot the results
+
+    # for i in range(64):
+    #     plt.title(i)
+    #     plt.imshow(image_patch[0, 0, :, :, i], cmap='gray')
+    #     plt.show()
+
+    index = 13
+    plt.figure()
+    plt.imshow(image_patch[0, 0, :, :, index], cmap='gray')
+    plt.colorbar()
+    plt.savefig('ori.svg', bbox_inches='tight')
+    plt.figure()
+    plt.imshow(image_lc[0, 0, :, :, index], cmap='jet')
+    plt.colorbar()
+    plt.savefig('lc.svg', bbox_inches='tight')
+
+    _x, _y = np.arange(64),  np.arange(64)
+    _xx, _yy = np.meshgrid(_x, _y)
+    x, y = _xx.ravel(), _yy.ravel()
+
+    fig = plt.figure(figsize=(16, 8))
+    original_image = image_patch[0, 0, :, :, index].numpy().ravel()
+    contrast_image = image_lc[0, 0, :, :, index].numpy().ravel()
+
+    bottom = np.zeros_like(original_image)
+    ax1 = fig.add_subplot(121, projection='3d')
+    ax2 = fig.add_subplot(122, projection='3d')
+    # ax1.axis('off')
+    # ax2.axis('off')
+
+    cmap = plt.get_cmap('jet')
+    ax1.bar3d(x, y, bottom, 1, 1, original_image, color=cmap(original_image), shade=True)
+    ax2.bar3d(x, y, bottom, 1, 1, contrast_image, color=cmap(contrast_image), shade=True)
+    plt.savefig('barplot.svg', bbox_inches='tight')
+    plt.show()
+
+
+if __name__ == '__main__':
+    _path = '/Users/zhiweideng/Desktop/NICR/VesselAnalysis/7T_MRA/organized/train/M003/M003_TOF.nii.gz'
+    contrast_vis(_path, loc=(280, 300, 170), patch_size=32)

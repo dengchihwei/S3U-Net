@@ -67,7 +67,6 @@ v_threshed = remove_small_objects(v_threshed, min_size=40)
 plt.figure()
 plt.imshow(v_threshed)
 plt.colorbar()
-
 plt.show()
 
 

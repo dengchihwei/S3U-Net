@@ -1,10 +1,10 @@
 {
-  "name": "SMILE_ADAPTIVE_LC",
+  "name": "TMI_ADAPTIVE_LC",
   "data": {
-    "type": "SMILEDataset",
+    "type": "TMIDataset",
     "batch_size": 21,
     "args": {
-      "data_dir": "../../VesselLearning/Datasets/SMILE",
+      "data_dir": "/ifs/loni/faculty/shi/spectrum/zdeng/UnsupervisedMicrobleed/datasets/TMI",
       "patch_sizes": [48, 48, 48],
       "spacings": [40, 40, 40],
       "train": true

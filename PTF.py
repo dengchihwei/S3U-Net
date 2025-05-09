@@ -3,7 +3,7 @@
 # @Date : 2023/8/14 18:18
 # @Author : zhiweideng
 # @E-mail : zhiweide@usc.edu
-
+from random import sample
 
 import torch
 import torch.nn.functional as F
@@ -108,13 +108,13 @@ def get_rotation_matrix_3d(src_dir, des_dir):
     des_dir = des_dir.repeat((b, 1))                                        # destination shape [B, 3]
     k = torch.bmm(src_dir.unsqueeze(2), des_dir.unsqueeze(1))               # [B, 3, 3]
     k -= torch.bmm(des_dir.unsqueeze(2), src_dir.unsqueeze(1))              # [B, 3, 3]
-    rotation_matrices = torch.eye(c).repeat((b, 1, 1))                      # initialize the rotation matrix
+    rotation_matrices = torch.eye(c).repeat((b, 1, 1)).to(k.device)         # initialize the rotation matrix
     angle = torch.sum(src_dir * des_dir, dim=1)[:, None, None]              # the angle between the vectors [B,]
     rotation_matrices += k + torch.bmm(k, k) / (1 + angle)                  # construct the reconstruction matrix
     pos_indices = torch.argwhere(torch.abs(angle - 1.0) < 1.0e-10)          # find edge cases, same direction
     neg_indices = torch.argwhere(torch.abs(angle + 1.0) < 1.0e-10)          # find edge cases, opposite direction
-    rotation_matrices[pos_indices] = torch.eye(c)                           # same direction,  identity
-    rotation_matrices[neg_indices] = -torch.eye(c)                          # opposite direction, reverse identity
+    rotation_matrices[pos_indices] = torch.eye(c).to(k.device)              # same direction,  identity
+    rotation_matrices[neg_indices] = -torch.eye(c).to(k.device)             # opposite direction, reverse identity
     return rotation_matrices
 
 
@@ -125,9 +125,9 @@ def get_local_frame(optimal_dir):
     :return: local frames, 2D image [B, 2, 2], 3D image [B, 3, 3], normalized
     """
     if optimal_dir.shape[-1] == 3:
-        tr_dir = torch.tensor([1, 0, 0]) + 0.0
-        k1_dir = torch.tensor([0, 1, 0]) + 0.0
-        k2_dir = torch.tensor([0, 0, 1]) + 0.0
+        tr_dir = torch.tensor([1, 0, 0]).to(optimal_dir.device) + 0.0
+        k1_dir = torch.tensor([0, 1, 0]).to(optimal_dir.device) + 0.0
+        k2_dir = torch.tensor([0, 0, 1]).to(optimal_dir.device) + 0.0
         rt_mtx = get_rotation_matrix_3d(optimal_dir, tr_dir)
         k1_dir = torch.matmul(rt_mtx, k1_dir)
         k2_dir = torch.matmul(rt_mtx, k2_dir)
@@ -193,9 +193,9 @@ def model_tube(flux, init_frame, mean_rad, probe_num, sample_pt_num, step_len, k
 
 
 @torch.no_grad()
-def sample_curve(flux, rads, sample_num, dir_num=32, prob_num=10, cs_pt_num=5, max_k=0.05, step_len=0.25):
+def sample_arc(flux, rads, sample_num, dir_num=32, prob_num=10, cs_pt_num=5, max_k=0.05, step_len=0.25):
     """
-    Sample the curves over the whole images
+    Sample the arc over the whole images
     :param flux: 2D image [B, 1, H, W], 3D image [B, 1, H, W, D]. Vesselness response
     :param rads: 2D image [B, R, H, W], 3D image [B, R, H, W, D]. Estimated radius
     :param sample_num: number of curves to sample, int
@@ -235,7 +235,6 @@ def sample_curve(flux, rads, sample_num, dir_num=32, prob_num=10, cs_pt_num=5, m
             # model the tube and calculate prior [B, SN], [B, SN, PN, 2/3]
             prior, path = model_tube(flux, init_frame, avg_rad, prob_num, cs_pt_num, avg_rad * step_len, k1, k2)
             # get the best prior under current curvature sampling
-            # prior = (prior > 0.01) * prior
             indices = torch.argwhere(prior > optimal_prior)
             # update the results
             optimal_k1[indices[:, 0], indices[:, 1]] = sample_space[i]
@@ -251,7 +250,71 @@ def sample_curve(flux, rads, sample_num, dir_num=32, prob_num=10, cs_pt_num=5, m
     return optimal_res
 
 
+@torch.no_grad()
+def sample_curve(flux, rads, end_dir, sample_num, prob_num=10, cs_pt_num=5, max_k=0.05, step_len=0.25):
+    """
+    Sample the curves over the whole images
+    :param flux: 2D image [B, 1, H, W], 3D image [B, 1, H, W, D]. Vesselness response
+    :param rads: 2D image [B, R, H, W], 3D image [B, R, H, W, D]. Estimated radius
+    :param end_dir: initial direction for sampling 2D image [B, 2], 3D image [B, 3]
+    :param sample_num: number of curves to sample, int
+    :param prob_num: number of probing for every curve, int
+    :param cs_pt_num: number of sampling on the cross-sectional plane, int
+    :param max_k: the maximum limit of curvature, float
+    :param step_len: step length of each probe, in pixels, float
+    :return:
+    """
+    device, dim = flux.device, flux.dim()                               # dimension of directions, 2d or 3d
+    b, _, h, w = flux.shape[:4]
+    d = flux.shape[4] if dim == 5 else None
+    c = 3 if dim == 5 else 2
+    # get the center elements
+    cx, cy, cz = h // 2, w // 2, d // 2 if dim == 5 else None
+    end_rads = rads[:, :, cx, cy, cz] if dim == 5 else rads[:, :, cx, cy]
+    coords = torch.tensor([cx, cy, cz] if dim == 5 else [cx, cy]).repeat(b, 1, 1).to(device)
+    # process the radius for tube modeling
+    avg_rad = torch.mean(end_rads, dim=-1)                              # mean radius, [B,]
+    min_rad, _ = torch.min(end_rads, dim=-1)                            # mini radius, [B,]
+    # create containers for optimal solutions
+    optimal_k1 = torch.zeros(b, prob_num, device=device)
+    optimal_k2 = torch.zeros(b, prob_num, device=device)                # only used for 3d images
+    optimal_path = torch.zeros(b, prob_num, c, device=device)           # [B, prob_num, 2/3]
+    optimal_prior = - torch.ones(b, prob_num, device=device) * 1e10
+    # start to sample curves
+    sample_space = torch.linspace(-max_k, max_k, sample_num)
+    init_frame = torch.cat((coords, get_local_frame(end_dir)), dim=-2).unsqueeze(1)  # [B, 1, 3/4, 2/3]
+    # start sampling
+    curr_frame = init_frame
+    for i in range(prob_num):
+        for j in range(sample_num):
+            k1 = torch.ones(b, device=device) * sample_space[j] / 1.0
+            for k in range(sample_num if dim == 5 else 1):
+                k2 = torch.ones(b, device=device) * sample_space[k] / 1.0 if dim == 5 else None
+                # model the tube and calculate prior [B, 1], [B, SN, 1, 2/3]
+                prior, _ = model_tube(flux, curr_frame, min_rad * 0.1, 3, cs_pt_num, avg_rad * step_len / 3, k1, k2)
+                # get the best prior under current curvature sampling
+                indices = torch.argwhere(prior[:, 0] > optimal_prior[:, i])
+                # update the results
+                optimal_k1[indices, i] = sample_space[j]
+                optimal_k2[indices, i] = sample_space[k] if dim == 5 else 0.0
+                optimal_prior[indices, i] = prior[indices, 0]
+        # propagate the current frame
+        curr_opt_k1 = optimal_k1[:, i]
+        curr_opt_k2 = optimal_k2[:, i] if dim == 5 else None
+        curr_frame = propagate_frame(curr_frame, step_len, curr_opt_k1, curr_opt_k2)
+        optimal_path[:, i] = curr_frame[:, 0, 0]
+
+    optimal_res = {
+        'prior': optimal_prior,
+        'k1': optimal_k1,
+        'k2': optimal_k2,
+        'path': optimal_path
+    }
+    return optimal_res
+
+
 if __name__ == '__main__':
+    """ test the propagation function """
     # from matplotlib import pyplot as plt
     # X = torch.tensor([0.0, 0.0])
     # T = torch.tensor([0.0, 1.0])
@@ -268,5 +331,17 @@ if __name__ == '__main__':
     # plt.plot(points[:, 0], points[:, 1])
     # plt.show()
 
-    sv = get_sampling_vec(64, 2)
-    print(sv[31], sv[63])
+    """ test the symmetry of the sample directions """
+    # sv = get_sampling_vec(64, 2)
+    # print(sv[31], sv[63])
+
+    """ test the curve sampling functions """
+    _flux = torch.randn(4, 1, 32, 32, 32)
+    _rads = torch.randn(4, 64, 32, 32, 32)
+    _end_dirs = torch.randn(4, 3)
+    _sample_num = 32
+    _prob_num = 15
+    _cs_pt_num = 4
+    _max_k = 10
+    _step_len = 0.5
+    output = sample_curve(_flux, _rads, _end_dirs, _sample_num, _prob_num, _cs_pt_num, _max_k, _step_len)

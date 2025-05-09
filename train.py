@@ -140,18 +140,19 @@ class Trainer(object):
         """
         n_samples = 0
         batch_losses_sum = {}
+        prev_losses = None
 
         # start to training
-        self.model.train()
         for idx, batch in enumerate(tqdm(train_loader, desc=str(epoch_idx), unit='b', ncols=80, ascii=True)):
             images = batch['image'].cuda()
 
             # losses from loss function
+            # with torch.autocast(device_type='cuda'):
             if self.supervised:
                 gts = batch['label'].cuda()
-                _, batch_losses = self.model(images, gts)
+                o, batch_losses = self.model(images, gts)
             else:
-                _, batch_losses = self.model(images, self.loss_conf)
+                o, batch_losses = self.model(images, self.loss_conf)
 
             # first batch initialization loss
             if idx == 0:
@@ -162,9 +163,17 @@ class Trainer(object):
             if not torch.isnan(batch_losses['total_loss'].mean()):
                 self.optimizer.zero_grad()
                 batch_losses['total_loss'].mean().backward()
-                # torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
                 self.optimizer.step()
+                prev_losses = batch_losses
             else:
+                if type(o) is dict:
+                    print(o['vessel'].mean())
+                else:
+                    print(o.mean())
+                print('curr_losses', batch_losses)
+                print('prev_losses', prev_losses)
+                print(images.mean(dim=(1, 2, 3)))
                 raise ValueError('Loss Value Explosion!!!')
 
             # accumulate losses through batches
@@ -221,6 +230,7 @@ class Trainer(object):
         # start training
         epoch_num = self.trainer_conf['epoch_num']
         for epoch in range(1, epoch_num + 1):
+            self.model.train()
             # train current epoch
             losses = self.train_epoch(train_loader, epoch)
             # separate the epoch using one line '*'
@@ -300,11 +310,11 @@ def read_json(config_file):
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument('-c', '--config_file', type=str, default='./configs/drive/unet.json')
+parser.add_argument('-c', '--config_file', type=str, default='./configs/sevent/adaptive_wo_lc.json')
 
 
 if __name__ == '__main__':
-    os.environ['CUDA_VISIBLE_DEVICES'] = '5'
+    os.environ['CUDA_VISIBLE_DEVICES'] = '1,2'
     args = parser.parse_args()
     trainer = Trainer(args.config_file)
     trainer.train()

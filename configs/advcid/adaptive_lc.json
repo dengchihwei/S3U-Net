@@ -1,10 +1,10 @@
 {
-  "name": "SMILE_ADAPTIVE_LC",
+  "name": "ADVCID_ADAPTIVE_LC",
   "data": {
-    "type": "SMILEDataset",
-    "batch_size": 21,
+    "type": "ADVCIDDataset",
+    "batch_size": 16,
     "args": {
-      "data_dir": "../../VesselLearning/Datasets/SMILE",
+      "data_dir": "../../VesselLearning/Datasets/LSA_7T",
       "patch_sizes": [48, 48, 48],
       "spacings": [40, 40, 40],
       "train": true
@@ -15,8 +15,8 @@
     "args": {
       "in_ch": 1,
       "out_ch": 3,
-      "min_scale": 0.25,
-      "max_scale": 24.75,
+      "min_scale": 0.5,
+      "max_scale": 17.5,
       "radius_num": 128,
       "feat_dims": [64, 128, 256, 512]
     }
@@ -34,12 +34,12 @@
   },
   "trainer": {
     "train_type": "ADAPTIVE_LC",
-    "gpu_device_num": 3,
+    "gpu_device_num": 4,
     "epoch_num": 200,
     "save_period": 1,
     "resume": false,
     "resume_path": "None",
-    "checkpoint_dir": "../trained_models/SMILE"
+    "checkpoint_dir": "../trained_models/ADVCID"
   },
   "loss": {
     "lambda_flux": 5.0,

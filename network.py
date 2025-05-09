@@ -16,12 +16,17 @@ from loss import calc_local_contrast, vessel_loss
 class SingleConv2d(nn.Module):
     def __init__(self, in_ch, out_ch, size=3, pad=1, act=nn.ELU()):
         super(SingleConv2d, self).__init__()
-        self.conv = nn.Conv2d(in_ch, out_ch, kernel_size=size, padding=pad)
+        self.conv = nn.Conv2d(in_ch, out_ch, kernel_size=size, padding=pad, padding_mode='reflect', bias=False)
         self.norm = nn.BatchNorm2d(out_ch)
         self.relu = act
 
     def forward(self, x):
         x = self.conv(x)
+        try:
+            assert torch.any(torch.isfinite(x))
+        except AssertionError:
+            print('data:', x.mean(), x.max(), x.min())
+            print('w:', self.conv.weight.mean(), self.conv.weight.max(), self.conv.weight.min())
         x = self.norm(x)
         x = self.relu(x)
         return x
@@ -64,6 +69,7 @@ class SingleEncoder2d(nn.Module):
         self.conv = DoubleConv2d(in_ch, out_ch, size, pad)
 
     def forward(self, x):
+        assert not torch.any(torch.isnan(x))
         if self.apply_pool:
             x = self.pool(x)
         x = self.conv(x)
@@ -77,6 +83,7 @@ class SingleDecoder2d(nn.Module):
         self.conv = DoubleConv2d(in_ch, out_ch, size, pad)
 
     def forward(self, encoder_features, x):
+        assert not torch.any(torch.isnan(x))
         x = self.up_sample(encoder_features.size()[2:], x)
         x = torch.cat((encoder_features, x), dim=1)
         x = self.conv(x)
@@ -84,7 +91,7 @@ class SingleDecoder2d(nn.Module):
 
 
 class SpatialAttention2d(nn.Module):
-    def __init__(self, out_ch, min_scale, max_scale, size=3, pad=1, sample_num=64, sample_layers=4):
+    def __init__(self, out_ch, min_scale, max_scale, size=3, pad=1, sample_num=16, sample_layers=4):
         super(SpatialAttention2d, self).__init__()
         self.min_scale, self.max_scale = min_scale, max_scale
         self.sample_num = sample_num
@@ -93,9 +100,11 @@ class SpatialAttention2d(nn.Module):
         self.attention_conv = SingleConv2d(4, 1, size, pad, act=nn.Tanh())
 
     def forward(self, image, x, radius=None):
+        assert not torch.any(torch.isnan(x))
         if radius is None:
             radius = self.radius_conv(x) * self.max_scale + self.min_scale
         contrast = calc_local_contrast(image, radius, self.sample_num, self.sample_layer)
+        assert not torch.any(torch.isnan(contrast))
         avg_x = torch.mean(x, dim=1, keepdim=True)
         max_x, _ = torch.max(x, dim=1, keepdim=True)
         min_x, _ = torch.min(x, dim=1, keepdim=True)
@@ -185,6 +194,7 @@ class SingleEncoder3d(nn.Module):
         self.conv = DoubleConv3d(in_ch, out_ch, size, pad)
 
     def forward(self, x):
+        assert not torch.any(torch.isnan(x))
         if self.apply_pool:
             x = self.pool(x)
         x = self.conv(x)
@@ -198,6 +208,7 @@ class SingleDecoder3d(nn.Module):
         self.conv = DoubleConv3d(in_ch, out_ch, size)
 
     def forward(self, encoder_features, x):
+        assert not torch.any(torch.isnan(x))
         x = self.up_sample(encoder_features.size()[2:], x)
         x = torch.cat((encoder_features, x), dim=1)
         x = self.conv(x)
@@ -214,9 +225,11 @@ class SpatialAttention3d(nn.Module):
         self.attention_conv = SingleConv3d(3, 1, size, pad, act=nn.Sigmoid())
 
     def forward(self, image, x, radius=None):
+        assert not torch.any(torch.isnan(x))
         if radius is None:
             radius = self.radius_conv(x) * self.max_scale + self.min_scale
         contrast = calc_local_contrast(image, radius, self.sample_num, self.sample_layer)
+        assert not torch.any(torch.isnan(contrast))
         avg_x = torch.mean(x, dim=1, keepdim=True)
         max_x, _ = torch.max(x, dim=1, keepdim=True)
         attention = torch.cat([avg_x, max_x, contrast], dim=1)
@@ -290,7 +303,7 @@ class UNet2D(nn.Module):
         for param in layer.parameters():
             param.requires_grad = False
 
-    def forward(self, im, gt):
+    def forward(self, im, gt=None):
         x1 = self.encoder1(im)
         x2 = self.encoder2(x1)
         x3 = self.encoder3(x2)
@@ -304,7 +317,7 @@ class UNet2D(nn.Module):
         pred = self.pred(x)
 
         # calculate the losses
-        losses = {'total_loss': F.binary_cross_entropy_with_logits(pred, gt).unsqueeze(0)}
+        losses = {'total_loss': F.binary_cross_entropy_with_logits(pred, gt).unsqueeze(0)} if gt is not None else None
         return pred, losses
 
 
@@ -416,7 +429,7 @@ class UNet3D(nn.Module):
         for param in layer.parameters():
             param.requires_grad = False
 
-    def forward(self, im, gt):
+    def forward(self, im, gt=None):
         x1 = self.encoder1(im)
         x2 = self.encoder2(x1)
         x3 = self.encoder3(x2)
@@ -430,8 +443,9 @@ class UNet3D(nn.Module):
         pred = self.pred(x)
 
         # calculate the losses
-        losses = {'total_loss': F.binary_cross_entropy_with_logits(pred, gt).unsqueeze(0)}
-        return pred, losses
+        # losses = {'total_loss': F.binary_cross_entropy_with_logits(pred, gt).unsqueeze(0)} if gt is not None else None
+        # return pred, losses
+        return pred
 
 
 class LocalContrastNet3D(nn.Module):
@@ -467,6 +481,8 @@ class LocalContrastNet3D(nn.Module):
         x3 = self.encoder3(x2)
         x4 = self.encoder4(x3)
 
+        features = [x1, x2, x3, x4]
+
         # apply attention
         attentions = []
         if self.spt_attn:
@@ -477,17 +493,20 @@ class LocalContrastNet3D(nn.Module):
             x = F.interpolate(im, scale_factor=0.5, mode='trilinear')
             attention2 = self.level_attention2(x, x2)
             x2 = torch.mul(attention2, x2)
-            attentions.append(attention1)
+            attentions.append(attention2)
 
             x = F.interpolate(x, scale_factor=0.5, mode='trilinear')
             attention3 = self.level_attention3(x, x3)
             x3 = torch.mul(attention3, x3)
-            attentions.append(attention1)
+            attentions.append(attention3)
 
         # decoding
         x = self.decoder1(x3, x4)
+        features.append(x.clone())
         x = self.decoder2(x2, x)
+        features.append(x.clone())
         x = self.decoder3(x1, x)
+        features.append(x.clone())
 
         # final conv
         recon = self.recon_conv(x)
@@ -496,6 +515,7 @@ class LocalContrastNet3D(nn.Module):
 
         # output dicts
         output = {
+            'feat': self.process_feats(features),
             'recon': recon,
             'radius': radius,
             'vessel': direction
@@ -508,6 +528,22 @@ class LocalContrastNet3D(nn.Module):
             output['attentions'] = attentions
         losses = vessel_loss(im, output, loss_config) if loss_config is not None else None
         return output, losses
+
+    @staticmethod
+    def process_feats(layer_features):
+        """
+        process the feature lists output by the network
+        :param layer_features: a list of U-Net features of different layers
+        :return: final features [b, c1+c2+c3+c4+c5+c6+c7, h, w, d]
+        """
+        x1, x2, x3, x4, x5, x6, x7 = layer_features
+        x2 = F.interpolate(x2, scale_factor=2, mode='trilinear')
+        x3 = F.interpolate(x3, scale_factor=4, mode='trilinear')
+        x4 = F.interpolate(x4, scale_factor=8, mode='trilinear')
+        x5 = F.interpolate(x5, scale_factor=4, mode='trilinear')
+        x6 = F.interpolate(x6, scale_factor=2, mode='trilinear')
+        final_feats = torch.cat([x1, x2, x3, x4, x5, x6, x7], dim=1)
+        return final_feats
 
 
 if __name__ == '__main__':
